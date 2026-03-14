@@ -302,6 +302,19 @@ def _build_dashboard(sheet):
     return ws
 
 
+def _update_dashboard_data(sheet):
+    """Update dashboard formulas/values only — NO formatting changes."""
+    ws = _get_or_create_tab(sheet, TAB_DASHBOARD, rows=60, cols=16)
+
+    # Only write the date — formulas reference All Picks/Today's Picks directly
+    # so they auto-update when those tabs change. Just refresh the date.
+    ws.update(range_name="G3", values=[
+        [datetime.now().strftime("%B %d, %Y")]
+    ], value_input_option="USER_ENTERED")
+
+    print(f"Dashboard updated")
+
+
 # =====================================================================
 # TAB 2: ALL PICKS (append-only, grows over time)
 # =====================================================================
@@ -322,7 +335,7 @@ def _append_to_all_picks(sheet, picks_df):
     new_data = picks_df[COLUMNS].values.tolist()
     if new_data:
         ws.update(range_name=f"A{next_row}", values=new_data)
-        _style_picks_tab(sheet, ws, next_row - 1)
+        # NO formatting — user manages their own layout
         print(f"Appended {len(new_data)} picks to '{TAB_ALL_PICKS}' (total: {next_row - 1} rows)")
 
     return ws
@@ -341,7 +354,7 @@ def _write_today_picks(sheet, picks_df):
     data = [COLUMNS] + picks_df[COLUMNS].values.tolist()
     ws.update(range_name="A1", values=data)
 
-    _style_picks_tab(sheet, ws, num_data_rows)
+    # NO formatting — user manages their own layout
     print(f"Today's picks written ({num_data_rows} picks)")
     return ws
 
@@ -366,8 +379,10 @@ def write_picks(picks_df):
     # Tab 2: All Picks (append)
     _append_to_all_picks(sheet, picks_df)
 
-    # Tab 1: Dashboard (rebuild formulas)
-    _build_dashboard(sheet)
+    # Tab 1: Dashboard — only write formulas, never reformat
+    # The dashboard data/formulas get rewritten so values update,
+    # but NO formatting calls (user manages their own layout)
+    _update_dashboard_data(sheet)
 
     # Reorder tabs: Dashboard first, then All Picks, then Today
     try:
