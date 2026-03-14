@@ -179,7 +179,24 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     proj_home = home_rpg * (away_rapg / league_avg_rpg)
     proj_away = away_rpg * (home_rapg / league_avg_rpg)
 
-    # Step 6: Home field advantage
+    # Step 6: Common opponent adjustment
+    # If both teams played the same opponents, compare how they did.
+    # This is one of the strongest signals in college sports — direct comparison
+    # through shared opponents cuts through schedule noise.
+    # co_edge > 0 means home team did better vs common opponents.
+    # Weight increases with number of common opponents (more data = more reliable).
+    co_edge = home_stats.get("_co_edge", 0)
+    co_count = home_stats.get("_co_count", 0)
+    if co_count >= 2 and co_edge != 0:
+        # Scale: each +1 run of common opponent edge adjusts projection by ~0.15 runs
+        # More common opponents = more weight (capped at 5)
+        reliability = min(co_count, 5) / 5.0  # 0.4 at 2 common, 1.0 at 5+
+        CO_WEIGHT = 0.15
+        co_adj = co_edge * CO_WEIGHT * reliability
+        proj_home += co_adj / 2.0
+        proj_away -= co_adj / 2.0
+
+    # Step 7: Home field advantage
     if not neutral:
         proj_home += HOME_FIELD_ADV / 2.0
         proj_away -= HOME_FIELD_ADV / 2.0
@@ -449,11 +466,15 @@ def generate_picks(games, league_avg_rpg=None):
         if not has_stats and not has_lines:
             continue
 
-        # Project runs
+        # Project runs — inject common opponent data into home_stats for the projection
         league_avg_sos = game.get("league_avg_sos")
         if has_stats:
+            # Temporarily add common opponent edge to home_stats so project_runs can use it
+            home_stats_ext = dict(home_stats)
+            home_stats_ext["_co_edge"] = game.get("co_edge", 0)
+            home_stats_ext["_co_count"] = game.get("co_count", 0)
             proj_home, proj_away = project_runs(
-                home_stats, away_stats, league_avg_rpg, league_avg_sos, neutral
+                home_stats_ext, away_stats, league_avg_rpg, league_avg_sos, neutral
             )
         elif run_line is not None and total is not None:
             proj_home, proj_away = project_runs_fallback(run_line, total)

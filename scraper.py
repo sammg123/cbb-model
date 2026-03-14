@@ -674,6 +674,123 @@ def get_starters_from_espn(games):
     return starters
 
 
+# --- Common Opponent Analysis ---
+
+def get_season_results(days_back=25):
+    """Fetch game results from the last N days using NCAA API (all D1 games).
+
+    NCAA API has ~100-160 games/day vs ESPN's ~6. This gives us
+    comprehensive common opponent data for the entire D1 landscape.
+
+    Returns dict: {normalized_team: [(opponent_norm, margin, date_str), ...]}
+    """
+    import time as _time
+
+    results_by_team = {}
+    total_games = 0
+    dates_fetched = 0
+
+    for days_ago in range(1, days_back + 1):
+        date = (datetime.now() - timedelta(days=days_ago))
+        date_str = date.strftime("%Y/%m/%d")
+        date_label = date.strftime("%Y-%m-%d")
+
+        url = f"{NCAA_API_BASE}/scoreboard/baseball/d1/{date_str}"
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+        except Exception:
+            continue
+
+        dates_fetched += 1
+        games = data.get("games", [])
+
+        for g in games:
+            game = g.get("game", {})
+            if game.get("gameState") != "final":
+                continue
+
+            home_info = game.get("home", {})
+            away_info = game.get("away", {})
+
+            home_name = home_info.get("names", {}).get("short", "")
+            away_name = away_info.get("names", {}).get("short", "")
+
+            try:
+                home_score = int(home_info.get("score", 0))
+                away_score = int(away_info.get("score", 0))
+            except (ValueError, TypeError):
+                continue
+
+            if not home_name or not away_name:
+                continue
+
+            home_norm = normalize_name(home_name)
+            away_norm = normalize_name(away_name)
+            margin = home_score - away_score
+
+            results_by_team.setdefault(home_norm, []).append(
+                (away_norm, margin, date_label)
+            )
+            results_by_team.setdefault(away_norm, []).append(
+                (home_norm, -margin, date_label)
+            )
+            total_games += 1
+
+        _time.sleep(0.25)  # Respect 5 req/sec rate limit
+
+    print(f"Built common opponent DB: {len(results_by_team)} teams, {total_games} games ({dates_fetched} days)")
+    return results_by_team
+
+
+def common_opponent_edge(team_a_norm, team_b_norm, results_by_team):
+    """Calculate common opponent differential between two teams.
+
+    Finds all opponents both teams have played, compares margins.
+    Returns (edge_for_a, num_common_opponents):
+      - edge > 0 means team_a performed better against common opponents
+      - edge < 0 means team_b performed better
+      - num = how many common opponents (more = more reliable)
+
+    Example: Team A beat Opp X by +5, Team B lost to Opp X by -3
+             → Team A has +8 edge in that comparison
+    """
+    a_games = results_by_team.get(team_a_norm, [])
+    b_games = results_by_team.get(team_b_norm, [])
+
+    if not a_games or not b_games:
+        return 0, 0
+
+    # Build opponent -> [margins] for each team
+    a_by_opp = {}
+    for opp, margin, _ in a_games:
+        a_by_opp.setdefault(opp, []).append(margin)
+
+    b_by_opp = {}
+    for opp, margin, _ in b_games:
+        b_by_opp.setdefault(opp, []).append(margin)
+
+    # Find common opponents (exclude head-to-head)
+    common = set(a_by_opp.keys()) & set(b_by_opp.keys())
+    common.discard(team_a_norm)
+    common.discard(team_b_norm)
+
+    if not common:
+        return 0, 0
+
+    # Average margin differential across common opponents
+    total_diff = 0
+    for opp in common:
+        a_avg = sum(a_by_opp[opp]) / len(a_by_opp[opp])
+        b_avg = sum(b_by_opp[opp]) / len(b_by_opp[opp])
+        total_diff += (a_avg - b_avg)
+
+    edge = total_diff / len(common)
+    return edge, len(common)
+
+
 # --- Odds Scraping ---
 # Sources tried in order:
 #   1. The Odds API (best, but requires API key — returns DK + FD odds)

@@ -7,13 +7,13 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from scraper import get_schedule, get_team_stats, get_odds, get_game_results, match_team, normalize_name
+from scraper import get_schedule, get_team_stats, get_odds, get_game_results, match_team, normalize_name, get_season_results, common_opponent_edge
 from model import generate_picks, picks_to_dataframe
 from sheets import write_picks, update_results_in_all_picks, COLUMNS
 
 
-def merge_game_data(games, team_stats, odds):
-    """Combine schedule, team stats, and odds into model-ready game dicts."""
+def merge_game_data(games, team_stats, odds, season_results=None):
+    """Combine schedule, team stats, odds, and common opponent data into model-ready game dicts."""
     merged = []
     matched_count = 0
     no_stats_count = 0
@@ -127,6 +127,12 @@ def merge_game_data(games, team_stats, odds):
         home_ml = primary_odds.get("home_ml") if primary_odds else None
         away_ml = primary_odds.get("away_ml") if primary_odds else None
 
+        # Common opponent analysis
+        co_edge = 0
+        co_count = 0
+        if season_results:
+            co_edge, co_count = common_opponent_edge(home_norm, away_norm, season_results)
+
         merged.append({
             "home": home,
             "away": away,
@@ -140,6 +146,8 @@ def merge_game_data(games, team_stats, odds):
             "sportsbook": primary_book,
             "league_avg_rpg": league_avg_rpg,
             "league_avg_sos": league_avg_sos,
+            "co_edge": co_edge,        # + = home better vs common opponents
+            "co_count": co_count,       # how many common opponents (reliability)
         })
 
         # Also generate picks with other books if they have meaningfully different lines
@@ -298,18 +306,18 @@ def run_daily():
 
     today = datetime.now().strftime("%Y%m%d")
 
-    # Fetch odds first — the raw Odds API response also gives us games
-    # that ESPN might miss, so we pass it to get_schedule for cross-reference
+    # Fetch all data sources
     team_stats = get_team_stats()
     odds, odds_api_raw = get_odds(today)
     games = get_schedule(today, odds_data=odds_api_raw)
+    season_results = get_season_results(days_back=25)
     if not games:
         print("No games found for today.")
         return
 
     # Step 3: Merge + cross-check
     print("\n--- Data merge & cross-check ---")
-    merged = merge_game_data(games, team_stats, odds)
+    merged = merge_game_data(games, team_stats, odds, season_results)
     print(f"  Total game entries: {len(merged)}")
 
     # Step 4: Run model
