@@ -531,6 +531,21 @@ def generate_picks(games, league_avg_rpg=None):
             proj_home, proj_away = project_runs(
                 home_stats_ext, away_stats_ext, league_avg_rpg, league_avg_sos, neutral
             )
+
+            # Blend model total with market total — the market knows things
+            # the model doesn't (starting pitchers, weather, park factors).
+            # Without this, the model projects every game at ~12-13 total
+            # regardless of what the market says, creating systematic Under bias.
+            if total is not None:
+                model_total = proj_home + proj_away
+                TOTAL_MARKET_WEIGHT = 0.50  # 50% model, 50% market
+                blended_total = TOTAL_MARKET_WEIGHT * model_total + (1 - TOTAL_MARKET_WEIGHT) * total
+                # Preserve the model's home/away ratio but scale to blended total
+                if model_total > 0:
+                    ratio = proj_home / model_total
+                    proj_home = blended_total * ratio
+                    proj_away = blended_total * (1 - ratio)
+
         elif run_line is not None and total is not None:
             proj_home, proj_away = project_runs_fallback(run_line, total)
         else:
