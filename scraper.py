@@ -419,6 +419,9 @@ def _scrape_warren_nolan_stat(year, stat_page):
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    # Determine if this is a stat that can be negative (scoring margin)
+    allows_negative = "margin" in stat_page
+
     stats = {}
     table = soup.find("table")
     if not table:
@@ -442,9 +445,20 @@ def _scrape_warren_nolan_stat(year, stat_page):
             continue
 
         try:
-            value = float(value_cell.get_text(strip=True))
-            if 0 < value < 30:  # Sanity check for runs per game
-                stats[normalize_name(team)] = value
+            # WarrenNolan uses unicode minus sign (U+2212) for negative values
+            # and explicit '+' for positive — normalize both for float()
+            raw_text = value_cell.get_text(strip=True)
+            raw_text = raw_text.replace("\u2212", "-").replace("\u2013", "-")
+            raw_text = raw_text.lstrip("+")
+            value = float(raw_text)
+            # Sanity check: margin can be negative (-30 to +30),
+            # other stats (RPG, RA/G, streaks) are positive (0 to 30)
+            if allows_negative:
+                if -30 < value < 30:
+                    stats[normalize_name(team)] = value
+            else:
+                if 0 < value < 30:
+                    stats[normalize_name(team)] = value
         except (ValueError, IndexError):
             continue
 

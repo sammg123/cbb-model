@@ -172,6 +172,8 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
             "home_qual_games": home_qual.get("qual_games", 0),
             "away_qual_margin": away_qual.get("qual_margin", 0),
             "away_qual_games": away_qual.get("qual_games", 0),
+            "home_overall_wpct": home_qual.get("overall_wpct"),
+            "away_overall_wpct": away_qual.get("overall_wpct"),
             "over_odds": over_odds,
             "under_odds": under_odds,
             "home_rl_odds": home_rl_odds,

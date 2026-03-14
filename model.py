@@ -136,7 +136,7 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     # Step 3: WHIP pitching quality refinement
     # NOTE: ERA blend was removed — ERA < RA/G always (excludes unearned runs),
     # so blending it in created a systematic Under bias on every game.
-    # ERA is kept in the data for individual pitcher adjustments only.
+    # ERA is kept as a RELATIVE differential signal (see Step 3b below).
     # WHIP is a better signal for team pitching quality relative to opponents.
     home_whip = home_stats.get("whip")
     away_whip = away_stats.get("whip")
@@ -147,6 +147,40 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
             # 10% weight: lower WHIP = fewer baserunners = fewer runs allowed
             home_rapg *= (1.0 + 0.10 * (home_whip / avg_whip - 1.0))
             away_rapg *= (1.0 + 0.10 * (away_whip / avg_whip - 1.0))
+
+    # Step 3b: ERA differential adjustment
+    # ERA was removed as an absolute blend (it caused Under bias because
+    # ERA < RA/G systematically). But the RELATIVE gap between two teams'
+    # ERAs is still informative — if Team A has ERA 2.5 and Team B has 6.0,
+    # that's a strong pitching quality signal beyond RA/G alone.
+    # Apply as a small modifier to the opposing team's projected runs:
+    # each +1 run of ERA differential adjusts opponent's runs by ~1.5%.
+    ERA_DIFF_WEIGHT = 0.015  # 1.5% per run of ERA gap
+    home_era = home_stats.get("era")
+    away_era = away_stats.get("era")
+
+    if home_era is not None and away_era is not None:
+        era_diff = away_era - home_era  # positive = home has better (lower) ERA
+        # Home pitches better → away scores less; away pitches better → home scores less
+        away_rpg *= (1.0 - ERA_DIFF_WEIGHT * max(-4, min(4, era_diff)))
+        home_rpg *= (1.0 + ERA_DIFF_WEIGHT * max(-4, min(4, era_diff)))
+
+    # Step 3c: Batting average differential adjustment
+    # BA is already somewhat reflected in RPG, but it provides additional
+    # signal about offensive contact quality. A team hitting .320 vs .240
+    # has a meaningful edge in getting on base and sustaining rallies.
+    # Keep it subtle — 2% per .050 of BA differential (≈ 1 std dev).
+    BA_DIFF_WEIGHT = 0.40  # 2% per .050 BA gap → 0.40 per 1.0 BA gap
+    home_ba = home_stats.get("ba")
+    away_ba = away_stats.get("ba")
+
+    if home_ba is not None and away_ba is not None:
+        ba_diff = home_ba - away_ba  # positive = home hits better
+        # Cap at +/- .100 differential (~2 std devs)
+        ba_diff = max(-0.100, min(0.100, ba_diff))
+        # Team with higher BA gets a small RPG boost
+        home_rpg *= (1.0 + BA_DIFF_WEIGHT * ba_diff)
+        away_rpg *= (1.0 - BA_DIFF_WEIGHT * ba_diff)
 
     # Step 4: Momentum adjustment
     # Teams on hot streaks perform ~2-3% better, cold streaks ~2-3% worse.
@@ -209,6 +243,24 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
         reliability = min(away_qg, 8) / 8.0
         away_rpg *= (1.0 + QUALITY_WEIGHT * away_qm * reliability)
         away_rapg *= (1.0 - QUALITY_WEIGHT * away_qm * reliability * 0.5)
+
+    # Step 5b: Overall winning percentage adjustment
+    # A team with .800 wpct is genuinely better than one with .400.
+    # This is a blunt signal (doesn't account for SOS) but complements
+    # the quality margin adjustment above. Applied as a small modifier
+    # centered on .500 — each .100 of wpct above/below .500 adjusts by ~2%.
+    WPCT_WEIGHT = 0.20  # 2% per .100 wpct deviation from .500
+    home_wpct = home_stats.get("_overall_wpct")
+    away_wpct = away_stats.get("_overall_wpct")
+
+    if home_wpct is not None and away_wpct is not None:
+        home_wpct_adj = 1.0 + WPCT_WEIGHT * (home_wpct - 0.500)
+        away_wpct_adj = 1.0 + WPCT_WEIGHT * (away_wpct - 0.500)
+        # Cap the adjustment at +/- 6% (wpct .800 or .200)
+        home_wpct_adj = max(0.94, min(1.06, home_wpct_adj))
+        away_wpct_adj = max(0.94, min(1.06, away_wpct_adj))
+        home_rpg *= home_wpct_adj
+        away_rpg *= away_wpct_adj
 
     # Step 6: Log5 matchup projection
     proj_home = home_rpg * (away_rapg / league_avg_rpg)
@@ -533,10 +585,12 @@ def generate_picks(games, league_avg_rpg=None):
             home_stats_ext["_co_count"] = game.get("co_count", 0)
             home_stats_ext["_qual_margin"] = game.get("home_qual_margin", 0)
             home_stats_ext["_qual_games"] = game.get("home_qual_games", 0)
+            home_stats_ext["_overall_wpct"] = game.get("home_overall_wpct")
 
             away_stats_ext = dict(away_stats)
             away_stats_ext["_qual_margin"] = game.get("away_qual_margin", 0)
             away_stats_ext["_qual_games"] = game.get("away_qual_games", 0)
+            away_stats_ext["_overall_wpct"] = game.get("away_overall_wpct")
             proj_home, proj_away = project_runs(
                 home_stats_ext, away_stats_ext, league_avg_rpg, league_avg_sos, neutral
             )
