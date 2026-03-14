@@ -12,8 +12,8 @@ from model import generate_picks, picks_to_dataframe
 from sheets import write_picks, update_results_in_all_picks, COLUMNS
 
 
-def merge_game_data(games, team_stats, odds, season_results=None):
-    """Combine schedule, team stats, odds, and common opponent data into model-ready game dicts."""
+def merge_game_data(games, team_stats, odds, season_results=None, quality_records=None):
+    """Combine schedule, team stats, odds, common opponent, and quality records into model-ready game dicts."""
     merged = []
     matched_count = 0
     no_stats_count = 0
@@ -148,6 +148,10 @@ def merge_game_data(games, team_stats, odds, season_results=None):
         if season_results:
             co_edge, co_count = common_opponent_edge(home_norm, away_norm, season_results)
 
+        # Quality records — performance vs winning teams
+        home_qual = quality_records.get(home_norm, {}) if quality_records else {}
+        away_qual = quality_records.get(away_norm, {}) if quality_records else {}
+
         merged.append({
             "home": home,
             "away": away,
@@ -164,6 +168,10 @@ def merge_game_data(games, team_stats, odds, season_results=None):
             "game_time": game.get("game_time", ""),
             "co_edge": co_edge,
             "co_count": co_count,
+            "home_qual_margin": home_qual.get("qual_margin", 0),
+            "home_qual_games": home_qual.get("qual_games", 0),
+            "away_qual_margin": away_qual.get("qual_margin", 0),
+            "away_qual_games": away_qual.get("qual_games", 0),
             "over_odds": over_odds,
             "under_odds": under_odds,
             "home_rl_odds": home_rl_odds,
@@ -178,6 +186,40 @@ def merge_game_data(games, team_stats, odds, season_results=None):
     print(f"  Missing odds: {no_odds_count} games")
 
     return merged
+
+
+def _build_quality_records(season_results):
+    """Calculate each team's record and margin vs quality opponents (>.500 teams).
+
+    Returns dict: {team_norm: {"qual_margin": float, "qual_games": int, "overall_wpct": float}}
+    """
+    import numpy as np
+
+    # First pass: overall records
+    team_records = {}
+    for team, games in season_results.items():
+        wins = sum(1 for _, margin, _ in games if margin > 0)
+        losses = sum(1 for _, margin, _ in games if margin < 0)
+        total = wins + losses
+        team_records[team] = {"wpct": wins / total if total > 0 else 0.5, "games": total}
+
+    # Second pass: record vs winning teams
+    quality = {}
+    for team, games in season_results.items():
+        margins_vs_good = []
+        for opp, margin, _ in games:
+            opp_rec = team_records.get(opp, {})
+            if opp_rec.get("wpct", 0) > 0.500:
+                margins_vs_good.append(margin)
+
+        qual_margin = float(np.mean(margins_vs_good)) if margins_vs_good else 0
+        quality[team] = {
+            "qual_margin": qual_margin,
+            "qual_games": len(margins_vs_good),
+            "overall_wpct": team_records.get(team, {}).get("wpct", 0.5),
+        }
+
+    return quality
 
 
 def _fuzzy(a, b):
@@ -310,13 +352,16 @@ def run_daily():
     odds, odds_api_raw = get_odds(today)
     games = get_schedule(today, odds_data=odds_api_raw)
     season_results = get_season_results(days_back=25)
+
+    # Build quality records: how each team performs vs winning opponents
+    quality_records = _build_quality_records(season_results)
     if not games:
         print("No games found for today.")
         return
 
     # Step 3: Merge + cross-check
     print("\n--- Data merge & cross-check ---")
-    merged = merge_game_data(games, team_stats, odds, season_results)
+    merged = merge_game_data(games, team_stats, odds, season_results, quality_records)
     print(f"  Total game entries: {len(merged)}")
 
     # Step 4: Run model

@@ -169,7 +169,31 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     home_rpg *= home_streak_factor * home_margin_factor
     away_rpg *= away_streak_factor * away_margin_factor
 
-    # Step 5: Log5 matchup projection
+    # Step 5: Quality opponent adjustment
+    # How a team performs vs quality opponents (>.500 teams) is one of the
+    # strongest signals in college sports. A team beating good teams by +5
+    # is genuinely elite. A team losing to good teams by -10 is pretenders
+    # with inflated stats from weak opponents.
+    # Scale: each +1 run of quality margin adjusts RPG by ~2%
+    QUALITY_WEIGHT = 0.02
+    MIN_QUAL_GAMES = 3  # Need at least 3 quality games for signal
+
+    home_qm = home_stats.get("_qual_margin", 0)
+    home_qg = home_stats.get("_qual_games", 0)
+    away_qm = away_stats.get("_qual_margin", 0) if isinstance(away_stats.get("_qual_margin"), (int, float)) else 0
+    away_qg = away_stats.get("_qual_games", 0) if isinstance(away_stats.get("_qual_games"), (int, float)) else 0
+
+    if home_qg >= MIN_QUAL_GAMES:
+        reliability = min(home_qg, 8) / 8.0
+        home_rpg *= (1.0 + QUALITY_WEIGHT * home_qm * reliability)
+        home_rapg *= (1.0 - QUALITY_WEIGHT * home_qm * reliability * 0.5)
+
+    if away_qg >= MIN_QUAL_GAMES:
+        reliability = min(away_qg, 8) / 8.0
+        away_rpg *= (1.0 + QUALITY_WEIGHT * away_qm * reliability)
+        away_rapg *= (1.0 - QUALITY_WEIGHT * away_qm * reliability * 0.5)
+
+    # Step 6: Log5 matchup projection
     proj_home = home_rpg * (away_rapg / league_avg_rpg)
     proj_away = away_rpg * (home_rapg / league_avg_rpg)
 
@@ -182,10 +206,10 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     co_edge = home_stats.get("_co_edge", 0)
     co_count = home_stats.get("_co_count", 0)
     if co_count >= 2 and co_edge != 0:
-        # Scale: each +1 run of common opponent edge adjusts projection by ~0.15 runs
-        # More common opponents = more weight (capped at 5)
-        reliability = min(co_count, 5) / 5.0  # 0.4 at 2 common, 1.0 at 5+
-        CO_WEIGHT = 0.15
+        # Scale: each +1 run of common opponent edge adjusts projection by ~0.25 runs
+        # More common opponents = more weight (capped at 6)
+        reliability = min(co_count, 6) / 6.0
+        CO_WEIGHT = 0.25
         co_adj = co_edge * CO_WEIGHT * reliability
         proj_home += co_adj / 2.0
         proj_away -= co_adj / 2.0
@@ -481,12 +505,18 @@ def generate_picks(games, league_avg_rpg=None):
         # Project runs — inject common opponent data into home_stats for the projection
         league_avg_sos = game.get("league_avg_sos")
         if has_stats:
-            # Temporarily add common opponent edge to home_stats so project_runs can use it
+            # Inject matchup-specific data into stats dicts for projection
             home_stats_ext = dict(home_stats)
             home_stats_ext["_co_edge"] = game.get("co_edge", 0)
             home_stats_ext["_co_count"] = game.get("co_count", 0)
+            home_stats_ext["_qual_margin"] = game.get("home_qual_margin", 0)
+            home_stats_ext["_qual_games"] = game.get("home_qual_games", 0)
+
+            away_stats_ext = dict(away_stats)
+            away_stats_ext["_qual_margin"] = game.get("away_qual_margin", 0)
+            away_stats_ext["_qual_games"] = game.get("away_qual_games", 0)
             proj_home, proj_away = project_runs(
-                home_stats_ext, away_stats, league_avg_rpg, league_avg_sos, neutral
+                home_stats_ext, away_stats_ext, league_avg_rpg, league_avg_sos, neutral
             )
         elif run_line is not None and total is not None:
             proj_home, proj_away = project_runs_fallback(run_line, total)
