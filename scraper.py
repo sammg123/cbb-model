@@ -308,6 +308,9 @@ def get_team_stats(year=None):
     # WarrenNolan stats
     off_stats = _scrape_warren_nolan_stat(year, "stats-off-runs-per-game")
     def_stats = _scrape_warren_nolan_stat(year, "stats-def-runs-per-game")
+    margin_stats = _scrape_warren_nolan_stat(year, "stats-off-scoring-margin")
+    win_streaks = _scrape_warren_nolan_stat(year, "stats-streaks-current-wins")
+    loss_streaks = _scrape_warren_nolan_stat(year, "stats-streaks-current-losses")
     sos_data = _scrape_warren_nolan_sos(year)
 
     # NCAA API team pitching + batting stats
@@ -326,6 +329,11 @@ def get_team_stats(year=None):
         rpg = off_stats.get(team)
         ra_pg = def_stats.get(team)
         if rpg is not None and ra_pg is not None:
+            # Momentum: positive streak = winning, negative = losing
+            w_streak = win_streaks.get(team, 0)
+            l_streak = loss_streaks.get(team, 0)
+            momentum = w_streak if w_streak > 0 else -l_streak
+
             stats[team] = {
                 "rpg": rpg,
                 "ra_pg": ra_pg,
@@ -333,10 +341,13 @@ def get_team_stats(year=None):
                 "era": ncaa_era.get(team),
                 "whip": ncaa_whip.get(team),
                 "ba": ncaa_ba.get(team),
+                "margin": margin_stats.get(team, 0),  # avg scoring margin per game
+                "momentum": momentum,                   # +N = win streak, -N = loss streak
             }
 
     ncaa_count = sum(1 for s in stats.values() if s.get("era") is not None)
-    print(f"Loaded stats for {len(stats)} teams (WarrenNolan + {ncaa_count} with ERA/WHIP from NCAA)")
+    margin_count = sum(1 for s in stats.values() if s.get("margin", 0) != 0)
+    print(f"Loaded stats for {len(stats)} teams (WarrenNolan + {ncaa_count} ERA/WHIP + {margin_count} margin/momentum)")
     return stats
 
 

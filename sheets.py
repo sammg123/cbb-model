@@ -139,7 +139,7 @@ def _style_picks_tab(sheet, ws, num_data_rows):
             "backgroundColor": DARK_GRAY,
             "textFormat": {"foregroundColor": LIGHT_GRAY, "fontSize": 10,
                            "fontFamily": "Roboto Mono"},
-            "horizontalAlignment": "CENTER",
+            "horizontalAlignment": "LEFT",
         }})
         # Alternating row shading (limit to avoid rate limits)
         for i in range(2, min(num_rows + 1, 100), 2):

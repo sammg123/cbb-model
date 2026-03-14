@@ -103,10 +103,13 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     away_rpg = _regress_to_mean(away_stats["rpg"], league_avg_rpg)
     away_rapg = _regress_to_mean(away_stats["ra_pg"], league_avg_rapg)
 
-    # Step 2: Dampened SOS adjustment (30% weight)
-    # Full SOS double-counts with log5 which already adjusts for opponent quality.
-    # 30% dampening: if SOS says team is 10% tougher, we adjust by only 3%.
-    SOS_DAMPENING = 0.30
+    # Step 2: SOS adjustment (50% weight)
+    # SOS is critical — a team with 10 RPG against a .28 SOS (weak schedule)
+    # is NOT the same as 10 RPG against a .55 SOS (SEC schedule).
+    # We apply SOS only to raw stats BEFORE log5, not inside it.
+    # 50% dampening balances: strong enough to catch schedule inflation,
+    # not so strong that it double-counts with log5's opponent adjustment.
+    SOS_WEIGHT = 0.50
     if league_avg_sos and league_avg_sos > 0:
         home_sos = home_stats.get("sos") or league_avg_sos
         away_sos = away_stats.get("sos") or league_avg_sos
@@ -114,8 +117,8 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
         home_sos_raw = home_sos / league_avg_sos
         away_sos_raw = away_sos / league_avg_sos
 
-        home_sos_factor = 1.0 + SOS_DAMPENING * (home_sos_raw - 1.0)
-        away_sos_factor = 1.0 + SOS_DAMPENING * (away_sos_raw - 1.0)
+        home_sos_factor = 1.0 + SOS_WEIGHT * (home_sos_raw - 1.0)
+        away_sos_factor = 1.0 + SOS_WEIGHT * (away_sos_raw - 1.0)
 
         home_rpg *= home_sos_factor
         away_rpg *= away_sos_factor
@@ -143,11 +146,40 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
             home_rapg *= (1.0 + 0.10 * (home_whip / avg_whip - 1.0))
             away_rapg *= (1.0 + 0.10 * (away_whip / avg_whip - 1.0))
 
-    # Step 4: Log5 matchup projection
+    # Step 4: Momentum adjustment
+    # Teams on hot streaks perform ~2-3% better, cold streaks ~2-3% worse.
+    # A 5-game win streak adds ~0.15 runs to offense, subtracts ~0.15 from runs allowed.
+    # A 5-game losing streak does the opposite.
+    # Scoring margin reinforces this: a team winning by 5+/game is dominant,
+    # not just lucky. A team losing by 5+/game is collapsing.
+    MOMENTUM_WEIGHT = 0.03  # 3% per streak game (capped)
+    MAX_MOMENTUM_GAMES = 6  # Cap at 6 games of streak
+
+    home_momentum = home_stats.get("momentum", 0)
+    away_momentum = away_stats.get("momentum", 0)
+    home_margin = home_stats.get("margin", 0)
+    away_margin = away_stats.get("margin", 0)
+
+    # Streak factor: +6 streak → +18% boost, -6 streak → -18% penalty
+    home_streak_factor = 1.0 + MOMENTUM_WEIGHT * max(-MAX_MOMENTUM_GAMES, min(MAX_MOMENTUM_GAMES, home_momentum))
+    away_streak_factor = 1.0 + MOMENTUM_WEIGHT * max(-MAX_MOMENTUM_GAMES, min(MAX_MOMENTUM_GAMES, away_momentum))
+
+    # Margin factor: scoring margin is a strong signal of true team quality.
+    # A team with +5 margin/game is genuinely dominant. +0 is average. -5 is bad.
+    # Scale: each +1 margin adds ~1.5% to offense quality
+    MARGIN_WEIGHT = 0.015
+    home_margin_factor = 1.0 + MARGIN_WEIGHT * max(-6, min(6, home_margin))
+    away_margin_factor = 1.0 + MARGIN_WEIGHT * max(-6, min(6, away_margin))
+
+    # Apply momentum + margin to offense (hot team scores more, cold team scores less)
+    home_rpg *= home_streak_factor * home_margin_factor
+    away_rpg *= away_streak_factor * away_margin_factor
+
+    # Step 5: Log5 matchup projection
     proj_home = home_rpg * (away_rapg / league_avg_rpg)
     proj_away = away_rpg * (home_rapg / league_avg_rpg)
 
-    # Step 5: Home field advantage
+    # Step 6: Home field advantage
     if not neutral:
         proj_home += HOME_FIELD_ADV / 2.0
         proj_away -= HOME_FIELD_ADV / 2.0
