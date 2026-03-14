@@ -57,12 +57,12 @@ MIN_EV_THRESHOLD = 0.03  # 3% EV minimum to show
 #   - 15-20% = very strong, line is clearly off
 #   - 20%+ = max conviction (could also be model noise — cap at 3u)
 UNIT_TIERS_EDGE = [
-    (0.18, 3.0),   # 18%+ edge
-    (0.14, 2.5),   # 14-18% edge
-    (0.10, 2.0),   # 10-14% edge
-    (0.07, 1.5),   # 7-10% edge
-    (0.04, 1.0),   # 4-7% edge
-    (0.03, 0.5),   # 3-4% edge — minimum play
+    (0.22, 3.0),   # 22%+ edge — ultra conviction, line is blatantly wrong
+    (0.17, 2.5),   # 17-22% edge — very strong
+    (0.12, 2.0),   # 12-17% edge — strong
+    (0.08, 1.5),   # 8-12% edge — solid
+    (0.05, 1.0),   # 5-8% edge — moderate lean
+    (0.03, 0.5),   # 3-5% edge — minimum play
 ]
 
 # Target pick count (not a hard cap — just for the top-quarter filter)
