@@ -9,7 +9,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from scraper import get_schedule, get_team_stats, get_odds, get_game_results, match_team, normalize_name
 from model import generate_picks, picks_to_dataframe
-from sheets import write_picks, COLUMNS
+from sheets import write_picks, update_results_in_all_picks, COLUMNS
 
 
 def merge_game_data(games, team_stats, odds):
@@ -184,7 +184,7 @@ def _fuzzy(a, b):
 
 
 def settle_yesterdays_bets():
-    """Check yesterday's results and update the sheet."""
+    """Check yesterday's results and update the All Picks tab."""
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday_espn = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
 
@@ -195,15 +195,15 @@ def settle_yesterdays_bets():
         print("No final results found for yesterday.")
         return
 
-    from sheets import get_client, get_or_create_spreadsheet, SPREADSHEET_NAME
+    from sheets import get_client, get_or_create_spreadsheet, SPREADSHEET_NAME, TAB_ALL_PICKS
     import gspread
 
     client = get_client()
     try:
         sheet = client.open(SPREADSHEET_NAME)
-        ws = sheet.worksheet(yesterday)
+        ws = sheet.worksheet(TAB_ALL_PICKS)
     except (gspread.SpreadsheetNotFound, gspread.WorksheetNotFound):
-        print(f"No picks tab found for {yesterday}")
+        print(f"No All Picks tab found")
         return
 
     all_rows = ws.get_all_records()
@@ -211,16 +211,20 @@ def settle_yesterdays_bets():
         return
 
     result_col = COLUMNS.index("Result") + 1
+    updated = 0
 
     for row_idx, row in enumerate(all_rows, start=2):
         if row.get("Result") != "Pending":
+            continue
+        # Only settle yesterday's picks (or older pending)
+        row_date = row.get("Date", "")
+        if row_date > yesterday:
             continue
 
         game = row.get("Game", "")
         bet_type = row.get("Bet Type", "")
         pick = row.get("Pick", "")
 
-        # Find matching result
         matched_result = None
         for game_key, res in results.items():
             if _fuzzy(game_key, game) or \
@@ -259,25 +263,14 @@ def settle_yesterdays_bets():
                     push = -actual_margin + spread_val == 0
                 else:
                     continue
-
                 result = "Push" if push else ("Hit" if covered else "Miss")
 
         elif bet_type == "Over/Under":
             total_line = float(pick.split()[-1])
             if "Over" in pick:
-                if actual_total > total_line:
-                    result = "Hit"
-                elif actual_total == total_line:
-                    result = "Push"
-                else:
-                    result = "Miss"
+                result = "Hit" if actual_total > total_line else ("Push" if actual_total == total_line else "Miss")
             elif "Under" in pick:
-                if actual_total < total_line:
-                    result = "Hit"
-                elif actual_total == total_line:
-                    result = "Push"
-                else:
-                    result = "Miss"
+                result = "Hit" if actual_total < total_line else ("Push" if actual_total == total_line else "Miss")
 
         elif bet_type == "Moneyline":
             pick_team = pick.replace(" ML", "").strip()
@@ -288,9 +281,10 @@ def settle_yesterdays_bets():
 
         if result:
             ws.update_cell(row_idx, result_col, result)
+            updated += 1
             print(f"  {game} | {bet_type} | {pick} -> {result}")
 
-    print("Settlement complete.")
+    print(f"Settlement complete ({updated} picks settled).")
 
 
 def run_daily():
@@ -335,7 +329,7 @@ def run_daily():
     # Print summary
     print(f"\n=== Today's Picks Summary ===")
     for pick in picks:
-        print(f"  {pick['Confidence']:6s} | {pick['Unit Size']:5s} | {pick['Game']} | {pick['Bet Type']} | {pick['Pick']} ({pick['Sportsbook']})")
+        print(f"  {pick['Score']:>7s} | {pick['Unit Size']:5s} | {pick['Game']} | {pick['Bet Type']} | {pick['Pick']} ({pick['Sportsbook']})")
 
 
 if __name__ == "__main__":
