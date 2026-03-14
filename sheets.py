@@ -182,9 +182,15 @@ def _style_picks_tab(sheet, ws, num_data_rows):
         })
     sheet.batch_update({"requests": batch_rules})
 
-    # Result dropdown
+    # Clear ALL old data validation (removes stale dropdowns from prior column layouts)
+    # Then apply Result dropdown to the correct column only
     result_col_idx = COLUMNS.index("Result")
     sheet.batch_update({"requests": [
+        {"setDataValidation": {
+            "range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1000,
+                      "startColumnIndex": 0, "endColumnIndex": len(COLUMNS) + 5},
+            "rule": None,
+        }},
         {"setDataValidation": {
             "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": max(num_rows, 500),
                       "startColumnIndex": result_col_idx, "endColumnIndex": result_col_idx + 1},
@@ -192,7 +198,7 @@ def _style_picks_tab(sheet, ws, num_data_rows):
                 {"userEnteredValue": "Pending"}, {"userEnteredValue": "Hit"},
                 {"userEnteredValue": "Miss"}, {"userEnteredValue": "Push"},
             ]}, "showCustomUi": True, "strict": True},
-        }}
+        }},
     ]})
 
 
