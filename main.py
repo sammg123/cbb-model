@@ -127,6 +127,13 @@ def merge_game_data(games, team_stats, odds, season_results=None):
         home_ml = primary_odds.get("home_ml") if primary_odds else None
         away_ml = primary_odds.get("away_ml") if primary_odds else None
 
+        # Sanity check: if both MLs are the same sign or suspiciously similar, discard them
+        # (FanDuel sometimes returns broken ML data like both teams at +450)
+        if home_ml and away_ml:
+            if (home_ml > 0 and away_ml > 0) or (home_ml < -900 and away_ml < -900):
+                home_ml = None
+                away_ml = None
+
         # Common opponent analysis
         co_edge = 0
         co_count = 0
@@ -150,29 +157,8 @@ def merge_game_data(games, team_stats, odds, season_results=None):
             "co_count": co_count,       # how many common opponents (reliability)
         })
 
-        # Also generate picks with other books if they have meaningfully different lines
-        if all_book_odds and primary_odds:
-            for book_key, lines in all_book_odds.items():
-                book_label = book_key.replace("_", " ").title()
-                if book_label == primary_book or not lines:
-                    continue
-                alt_total = lines.get("total")
-                pri_total = primary_odds.get("total")
-                if alt_total is not None and pri_total is not None and abs(alt_total - pri_total) >= 0.5:
-                    merged.append({
-                        "home": home,
-                        "away": away,
-                        "neutral": game.get("neutral", False),
-                        "spread": lines.get("spread"),
-                        "total": alt_total,
-                        "home_ml": lines.get("home_ml"),
-                        "away_ml": lines.get("away_ml"),
-                        "home_stats": home_stats,
-                        "away_stats": away_stats,
-                        "sportsbook": book_label,
-                        "league_avg_rpg": league_avg_rpg,
-                        "league_avg_sos": league_avg_sos,
-                    })
+        # One pick per game per bet type — no duplicates across books.
+        # FanDuel → DraftKings → others priority is handled above.
 
     print(f"  Odds matched: {matched_count}/{len(games)} games")
     print(f"  Missing team stats: {no_stats_count} games")
