@@ -2,9 +2,9 @@ name: Daily Baseball Picks
 
 on:
   schedule:
-    # 9:45 AM EST = 14:45 UTC (during EDT/summer: 13:45 UTC)
-    # Using 14:45 UTC which is 9:45 AM EST / 10:45 AM EDT
-    - cron: "45 14 * * *"
+    # 9:45 AM CST = 15:45 UTC (during CDT/summer: 14:45 UTC)
+    # Using 15:45 UTC which is 9:45 AM CST / 10:45 AM CDT
+    - cron: "45 15 * * *"
   workflow_dispatch: # Allow manual trigger from GitHub UI
 
 jobs:
