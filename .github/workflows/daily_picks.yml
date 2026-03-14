@@ -1,0 +1,35 @@
+name: Daily Baseball Picks
+
+on:
+  schedule:
+    # 9:45 AM EST = 14:45 UTC (during EDT/summer: 13:45 UTC)
+    # Using 14:45 UTC which is 9:45 AM EST / 10:45 AM EDT
+    - cron: "45 14 * * *"
+  workflow_dispatch: # Allow manual trigger from GitHub UI
+
+jobs:
+  daily-picks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google OAuth token
+        run: echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
+
+      - name: Write Google client secret
+        run: echo '${{ secrets.GOOGLE_CLIENT_SECRET }}' > client_secret.json
+
+      - name: Run daily picks
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python main.py
