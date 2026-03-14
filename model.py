@@ -545,6 +545,9 @@ def generate_picks(games, league_avg_rpg=None):
     # --- Dynamic daily threshold ---
     all_picks = _apply_daily_threshold(all_picks)
 
+    # Sort by date then time (earliest games first)
+    all_picks.sort(key=lambda p: (p.get("Date", ""), p.get("Time", "99:99")))
+
     return all_picks
 
 
@@ -571,7 +574,7 @@ def _make_pick(game_label, bet_type, pick_str, edge_data, sportsbook,
         "Sim %": f"{edge_data['sim_pct']:.1f}%",
         "Edge": f"{(model_prob - implied) * 100:.1f}%",
         "EV+": f"${ev * 100:+.2f}",
-        "Proj Score": f"{edges['proj_away']:.1f}-{edges['proj_home']:.1f}",
+        "Proj Score": f"{edges['proj_away']:.1f} - {edges['proj_home']:.1f}",
         "Proj Spread": f"{proj_spread:+.1f}",
         "Proj Total": f"{proj_total:.1f}",
         "Result": "Pending",

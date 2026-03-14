@@ -213,25 +213,25 @@ def _build_dashboard(sheet):
         ["", "", "", "", "", "", "", ""],
         # --- Record Section ---
         # AP = All Picks tab, TP = Today's Picks tab
-        # Column G = Unit Size (e.g. "2.0u"), Column O = Result, Column E = Odds
+        # With Time column: H=Unit Size, P=Result, F=Odds, D=Bet Type, I=Score
         ["", "RECORD", "", "", "UNITS", "", "", ""],
         ["", "Total Picks",
-         "=COUNTA('All Picks'!A2:A)-COUNTIF('All Picks'!O2:O,\"Pending\")", "",
+         "=COUNTA('All Picks'!A2:A)-COUNTIF('All Picks'!P2:P,\"Pending\")", "",
          "Units Wagered",
-         "=SUMPRODUCT((('All Picks'!O2:O=\"Hit\")+('All Picks'!O2:O=\"Miss\")+('All Picks'!O2:O=\"Push\"))*VALUE(SUBSTITUTE('All Picks'!G2:G,\"u\",\"\")))",
+         "=SUMPRODUCT((('All Picks'!P2:P=\"Hit\")+('All Picks'!P2:P=\"Miss\")+('All Picks'!P2:P=\"Push\"))*VALUE(SUBSTITUTE('All Picks'!H2:H,\"u\",\"\")))",
          "", ""],
         ["", "Hits",
-         "=COUNTIF('All Picks'!O2:O,\"Hit\")", "",
+         "=COUNTIF('All Picks'!P2:P,\"Hit\")", "",
          "Units Won",
-         "=SUMPRODUCT(('All Picks'!O2:O=\"Hit\")*VALUE(SUBSTITUTE('All Picks'!G2:G,\"u\",\"\")))",
+         "=SUMPRODUCT(('All Picks'!P2:P=\"Hit\")*VALUE(SUBSTITUTE('All Picks'!H2:H,\"u\",\"\")))",
          "", ""],
         ["", "Misses",
-         "=COUNTIF('All Picks'!O2:O,\"Miss\")", "",
+         "=COUNTIF('All Picks'!P2:P,\"Miss\")", "",
          "Units Lost",
-         "=-SUMPRODUCT(('All Picks'!O2:O=\"Miss\")*VALUE(SUBSTITUTE('All Picks'!G2:G,\"u\",\"\")))",
+         "=-SUMPRODUCT(('All Picks'!P2:P=\"Miss\")*VALUE(SUBSTITUTE('All Picks'!H2:H,\"u\",\"\")))",
          "", ""],
         ["", "Pushes",
-         "=COUNTIF('All Picks'!O2:O,\"Push\")", "",
+         "=COUNTIF('All Picks'!P2:P,\"Push\")", "",
          "Net Units", "=F7+F8", "", ""],
         ["", "Win Rate",
          "=IFERROR(C7/(C7+C8),0)", "",
@@ -240,12 +240,12 @@ def _build_dashboard(sheet):
         # --- Pending Section ---
         ["", "PENDING", "", "", "POSSIBLE", "", "", ""],
         ["", "Pending Picks",
-         "=COUNTIF('All Picks'!O2:O,\"Pending\")", "",
+         "=COUNTIF('All Picks'!P2:P,\"Pending\")", "",
          "Possible Profit",
-         "=SUMPRODUCT(('All Picks'!O2:O=\"Pending\")*VALUE(SUBSTITUTE('All Picks'!G2:G,\"u\",\"\")))",
+         "=SUMPRODUCT(('All Picks'!P2:P=\"Pending\")*VALUE(SUBSTITUTE('All Picks'!H2:H,\"u\",\"\")))",
          "", ""],
         ["", "Pending Units",
-         "=SUMPRODUCT(('All Picks'!O2:O=\"Pending\")*VALUE(SUBSTITUTE('All Picks'!G2:G,\"u\",\"\")))", "",
+         "=SUMPRODUCT(('All Picks'!P2:P=\"Pending\")*VALUE(SUBSTITUTE('All Picks'!H2:H,\"u\",\"\")))", "",
          "Possible Net", "=F13", "", ""],
         ["", "", "", "", "", "", "", ""],
         # --- Today Section ---
@@ -253,7 +253,7 @@ def _build_dashboard(sheet):
         ["", "Today's Picks",
          "=COUNTA('Today''s Picks'!A2:A)", "", "", "", "", ""],
         ["", "Today's Units",
-         "=IFERROR(SUMPRODUCT(VALUE(SUBSTITUTE('Today''s Picks'!G2:G,\"u\",\"\"))),0)",
+         "=IFERROR(SUMPRODUCT(VALUE(SUBSTITUTE('Today''s Picks'!H2:H,\"u\",\"\"))),0)",
          "", "", "", "", ""],
     ]
 
