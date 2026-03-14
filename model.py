@@ -47,14 +47,22 @@ MODEL_CONFIDENCE_MIN = 0.45     # Trust model 45% on extreme lines (+500/-500)
 # Below that, the edge is likely noise. Above it, you're exploiting a lazy line.
 MIN_EV_THRESHOLD = 0.03  # 3% EV minimum to show
 
-# Unit sizing tiers based on EV% — straightforward, not too conservative.
-# Higher EV = more confident the line is wrong = bet more.
-UNIT_TIERS = [
-    (0.15, 3.0),   # 15%+ EV: max confidence, line is very wrong
-    (0.10, 2.5),   # 10-15% EV: strong value
-    (0.07, 2.0),   # 7-10% EV: solid value
-    (0.05, 1.5),   # 5-7% EV: moderate value
-    (0.03, 1.0),   # 3-5% EV: minimum playable value
+# Unit sizing based on Edge (model prob - fair implied prob).
+# Edge is more honest than EV — it measures how "wrong" the line is
+# without the payout multiplier inflating underdog bets.
+# Edge tiers are calibrated to college baseball market inefficiency:
+#   - 3-6% edge = slight lean, worth a small bet
+#   - 6-10% = solid disagreement with market
+#   - 10-15% = strong conviction
+#   - 15-20% = very strong, line is clearly off
+#   - 20%+ = max conviction (could also be model noise — cap at 3u)
+UNIT_TIERS_EDGE = [
+    (0.18, 3.0),   # 18%+ edge
+    (0.14, 2.5),   # 14-18% edge
+    (0.10, 2.0),   # 10-14% edge
+    (0.07, 1.5),   # 7-10% edge
+    (0.04, 1.0),   # 4-7% edge
+    (0.03, 0.5),   # 3-4% edge — minimum play
 ]
 
 # Target pick count (not a hard cap — just for the top-quarter filter)
@@ -350,16 +358,17 @@ def calculate_ev(true_prob, american_odds):
     return true_prob * profit_if_win - (1 - true_prob)
 
 
-def ev_to_units(ev, american_odds=-110):
-    """Convert EV score to unit size based on EV tiers.
+def edge_to_units(edge_pct):
+    """Convert Edge (model prob - fair implied prob) to unit size.
 
-    Higher EV = line is more wrong = bet more units.
-    Simple and transparent.
+    Edge is more stable than EV for sizing because it's not inflated
+    by underdog payout multipliers. A 10% edge means the same thing
+    whether it's on a -110 spread or a +300 ML.
     """
-    if ev is None or ev <= 0:
+    if edge_pct is None or edge_pct <= 0:
         return 0
-    for min_ev, units in UNIT_TIERS:
-        if ev >= min_ev:
+    for min_edge, units in UNIT_TIERS_EDGE:
+        if edge_pct >= min_edge:
             return units
     return 0
 
@@ -411,7 +420,11 @@ def calculate_edges(home_scores, away_scores, run_line, total_line,
         over_raw = float(np.mean(totals > total_line) * 100)
         over_fair, under_fair = fair_probabilities(over_odds, under_odds)
         fair_over = (over_fair or 0.5) * 100
-        conf = _model_confidence_for_odds(over_odds)
+        # O/U gets LOWER model confidence than ML/RL because books set totals
+        # carefully and the model's total projections have known systematic bias.
+        # Trust model 45% on totals vs 65-70% on ML/RL.
+        OU_MODEL_CONFIDENCE = 0.45
+        conf = OU_MODEL_CONFIDENCE
         over_pct = conf * over_raw + (1 - conf) * fair_over
         under_pct = 100.0 - over_pct
         over_ev = calculate_ev(over_pct / 100.0, over_odds)
@@ -585,11 +598,11 @@ def _make_pick(game_label, bet_type, pick_str, edge_data, sportsbook,
                edges, proj_spread, proj_total, odds_override=None, game_time=""):
     """Build a pick dict with EV score and continuous unit sizing."""
     ev = edge_data["ev"]
-    bet_odds = edge_data.get("odds", -110) or -110
-    units = ev_to_units(ev, bet_odds)
     odds_display = odds_override or str(edge_data.get("odds", "-110"))
     implied = ml_to_implied_prob(edge_data.get("odds", -110)) or 0.524
     model_prob = (edge_data["sim_pct"] or 0) / 100.0
+    edge_pct = model_prob - implied
+    units = edge_to_units(edge_pct)
 
     return {
         "Date": datetime.now().strftime("%Y-%m-%d"),
