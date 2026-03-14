@@ -1085,18 +1085,28 @@ def _fetch_fanduel_odds():
                 for r in runners:
                     rtype = r.get("result", {}).get("type", "")
                     handicap = r.get("handicap")
+                    am_odds = r.get("winRunnerOdds", {}).get(
+                        "americanDisplayOdds", {}
+                    ).get("americanOdds")
                     if rtype == "HOME" and handicap is not None:
-                        # FanDuel handicap on HOME runner is the spread from
-                        # home perspective: positive = home underdog, negative
-                        # = home favored.  This matches our model convention.
                         game_odds["spread"] = float(handicap)
+                        if am_odds is not None:
+                            game_odds["home_rl_odds"] = int(am_odds)
+                    elif rtype == "AWAY" and am_odds is not None:
+                        game_odds["away_rl_odds"] = int(am_odds)
 
             elif "TOTAL" in mtype:
                 for r in runners:
-                    if r.get("runnerName") == "Over":
-                        handicap = r.get("handicap")
-                        if handicap is not None:
-                            game_odds["total"] = float(handicap)
+                    handicap = r.get("handicap")
+                    am_odds = r.get("winRunnerOdds", {}).get(
+                        "americanDisplayOdds", {}
+                    ).get("americanOdds")
+                    if r.get("runnerName") == "Over" and handicap is not None:
+                        game_odds["total"] = float(handicap)
+                        if am_odds is not None:
+                            game_odds["over_odds"] = int(am_odds)
+                    elif r.get("runnerName") == "Under" and am_odds is not None:
+                        game_odds["under_odds"] = int(am_odds)
 
         if game_odds:
             key = (home_norm, away_norm)

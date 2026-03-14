@@ -126,11 +126,19 @@ def merge_game_data(games, team_stats, odds, season_results=None):
         total = primary_odds.get("total") if primary_odds else None
         home_ml = primary_odds.get("home_ml") if primary_odds else None
         away_ml = primary_odds.get("away_ml") if primary_odds else None
+        # Actual juice per side (defaults to -110 if not available)
+        over_odds = primary_odds.get("over_odds", -110) if primary_odds else -110
+        under_odds = primary_odds.get("under_odds", -110) if primary_odds else -110
+        home_rl_odds = primary_odds.get("home_rl_odds", -110) if primary_odds else -110
+        away_rl_odds = primary_odds.get("away_rl_odds", -110) if primary_odds else -110
 
-        # Sanity check: if both MLs are the same sign or suspiciously similar, discard them
-        # (FanDuel sometimes returns broken ML data like both teams at +450)
+        # Sanity check: discard clearly broken ML data
+        # Valid MLB/college lines: one side negative (fav), other positive (dog)
+        # OR both negative for close games (e.g. -120/-110)
+        # OR both positive for pick'em (e.g. +105/+105) — this is fine
+        # Broken: both sides at same large value (e.g. +450/+450)
         if home_ml and away_ml:
-            if (home_ml > 0 and away_ml > 0) or (home_ml < -900 and away_ml < -900):
+            if home_ml > 0 and away_ml > 0 and abs(home_ml - away_ml) < 20 and home_ml > 200:
                 home_ml = None
                 away_ml = None
 
@@ -153,8 +161,13 @@ def merge_game_data(games, team_stats, odds, season_results=None):
             "sportsbook": primary_book,
             "league_avg_rpg": league_avg_rpg,
             "league_avg_sos": league_avg_sos,
-            "co_edge": co_edge,        # + = home better vs common opponents
-            "co_count": co_count,       # how many common opponents (reliability)
+            "game_time": game.get("game_time", ""),
+            "co_edge": co_edge,
+            "co_count": co_count,
+            "over_odds": over_odds,
+            "under_odds": under_odds,
+            "home_rl_odds": home_rl_odds,
+            "away_rl_odds": away_rl_odds,
         })
 
         # One pick per game per bet type — no duplicates across books.

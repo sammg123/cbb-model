@@ -28,7 +28,7 @@ TAB_ALL_PICKS = "All Picks"
 TAB_TODAY = "Today's Picks"
 
 COLUMNS = [
-    "Date", "Game", "Bet Type", "Pick", "Odds", "Sportsbook",
+    "Date", "Time", "Game", "Bet Type", "Pick", "Odds", "Sportsbook",
     "Unit Size", "Score", "Sim %", "Edge", "EV+",
     "Proj Score", "Proj Spread", "Proj Total", "Result",
 ]
@@ -134,15 +134,16 @@ def _style_picks_tab(sheet, ws, num_data_rows):
             "horizontalAlignment": "CENTER",
         }},
     ]
+    # Dark background for all possible data rows (not just current data)
+    formats.append({"range": f"A2:{last_col}500", "format": {
+        "backgroundColor": DARK_GRAY,
+        "textFormat": {"foregroundColor": LIGHT_GRAY, "fontSize": 10,
+                       "fontFamily": "Roboto Mono"},
+        "horizontalAlignment": "LEFT",
+    }})
+    # Alternating row shading for all possible rows
     if num_data_rows > 0:
-        formats.append({"range": f"A2:{last_col}{num_rows}", "format": {
-            "backgroundColor": DARK_GRAY,
-            "textFormat": {"foregroundColor": LIGHT_GRAY, "fontSize": 10,
-                           "fontFamily": "Roboto Mono"},
-            "horizontalAlignment": "LEFT",
-        }})
-        # Alternating row shading (limit to avoid rate limits)
-        for i in range(2, min(num_rows + 1, 100), 2):
+        for i in range(2, min(max(num_rows + 1, 50), 100), 2):
             formats.append({"range": f"A{i}:{last_col}{i}", "format": {"backgroundColor": MED_GRAY}})
     ws.batch_format(formats)
 

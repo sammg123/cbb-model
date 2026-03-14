@@ -64,17 +64,17 @@ TARGET_MAX_PICKS = 18
 
 # --- Run Projection ---
 
-def _regress_to_mean(raw_value, league_avg, games_played=17, regression_k=35):
+def _regress_to_mean(raw_value, league_avg, games_played=17, regression_k=15):
     """Regress a raw stat toward the league average based on sample size.
 
     With only 15-20 games early in a college season, raw stats are noisy.
     This blends observed performance with a prior (league average):
       regressed = (games * raw + k * avg) / (games + k)
 
-    regression_k=35 means ~33% weight on raw stats at 17 games,
-    increasing to ~59% at 50 games (late season).
-    This is deliberately conservative — better to miss a few real edges
-    than to generate phantom edges from noisy early-season data.
+    regression_k=15 gives ~53% weight on raw stats at 17 games,
+    increasing to ~77% at 50 games. This preserves the model's ability
+    to differentiate between high-scoring and low-scoring games
+    while still dampening extreme outliers.
     """
     weight = games_played / (games_played + regression_k)
     return weight * raw_value + (1 - weight) * league_avg
@@ -125,24 +125,18 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
         home_rapg /= home_sos_factor
         away_rapg /= away_sos_factor
 
-    # Step 3: ERA/WHIP pitching quality refinement
-    home_era = home_stats.get("era")
-    away_era = away_stats.get("era")
+    # Step 3: WHIP pitching quality refinement
+    # NOTE: ERA blend was removed — ERA < RA/G always (excludes unearned runs),
+    # so blending it in created a systematic Under bias on every game.
+    # ERA is kept in the data for individual pitcher adjustments only.
+    # WHIP is a better signal for team pitching quality relative to opponents.
     home_whip = home_stats.get("whip")
     away_whip = away_stats.get("whip")
-
-    if home_era is not None and away_era is not None:
-        # Regress ERA too (it's just as noisy as RA/G with 17 games)
-        league_avg_era = league_avg_rpg * 0.85  # ERA ≈ 85% of RA/G (unearned runs)
-        home_era_reg = _regress_to_mean(home_era, league_avg_era)
-        away_era_reg = _regress_to_mean(away_era, league_avg_era)
-        # Blend 70% regressed RA/G + 30% regressed ERA-based estimate
-        home_rapg = 0.70 * home_rapg + 0.30 * (home_era_reg * 1.1)
-        away_rapg = 0.70 * away_rapg + 0.30 * (away_era_reg * 1.1)
 
     if home_whip is not None and away_whip is not None:
         avg_whip = (home_whip + away_whip) / 2.0
         if avg_whip > 0:
+            # 10% weight: lower WHIP = fewer baserunners = fewer runs allowed
             home_rapg *= (1.0 + 0.10 * (home_whip / avg_whip - 1.0))
             away_rapg *= (1.0 + 0.10 * (away_whip / avg_whip - 1.0))
 
@@ -349,8 +343,8 @@ def ev_to_units(ev, american_odds=-110):
 # --- Edge Calculation ---
 
 def calculate_edges(home_scores, away_scores, run_line, total_line,
-                    home_ml, away_ml, has_stats):
-    """Calculate EV-based scores for all bet types."""
+                    home_ml, away_ml, has_stats, **kwargs):
+    """Calculate EV-based scores for all bet types using actual posted odds."""
     h = np.asarray(home_scores, dtype=np.float64)
     a = np.asarray(away_scores, dtype=np.float64)
 
@@ -367,35 +361,41 @@ def calculate_edges(home_scores, away_scores, run_line, total_line,
     away_win_pct = 100.0 - home_win_pct
 
     # --- Run Line ---
-    rl = {"ev": None, "sim_pct": None, "side": None, "odds": -110}
+    home_rl_odds = kwargs.get("home_rl_odds", -110)
+    away_rl_odds = kwargs.get("away_rl_odds", -110)
+    rl = {"ev": None, "sim_pct": None, "side": None, "odds": None}
     if run_line is not None:
         home_cover_raw = float(np.mean(margins > -run_line) * 100)
-        # Fair prob at -110/-110 is 50% (after devigging 4.76% hold)
-        fair = 50.0
-        conf = _model_confidence_for_odds(-110)
-        home_cover_pct = conf * home_cover_raw + (1 - conf) * fair
+        # Devig the run line odds to get fair probability
+        home_fair, away_fair = fair_probabilities(home_rl_odds, away_rl_odds)
+        fair_home = (home_fair or 0.5) * 100
+        conf = _model_confidence_for_odds(home_rl_odds)
+        home_cover_pct = conf * home_cover_raw + (1 - conf) * fair_home
         away_cover_pct = 100.0 - home_cover_pct
-        home_ev = calculate_ev(home_cover_pct / 100.0, -110)
-        away_ev = calculate_ev(away_cover_pct / 100.0, -110)
+        home_ev = calculate_ev(home_cover_pct / 100.0, home_rl_odds)
+        away_ev = calculate_ev(away_cover_pct / 100.0, away_rl_odds)
         if home_ev >= away_ev:
-            rl = {"ev": home_ev, "sim_pct": home_cover_pct, "side": "home", "odds": -110}
+            rl = {"ev": home_ev, "sim_pct": home_cover_pct, "side": "home", "odds": home_rl_odds}
         else:
-            rl = {"ev": away_ev, "sim_pct": away_cover_pct, "side": "away", "odds": -110}
+            rl = {"ev": away_ev, "sim_pct": away_cover_pct, "side": "away", "odds": away_rl_odds}
 
     # --- Over/Under ---
-    ou = {"ev": None, "sim_pct": None, "side": None, "odds": -110}
+    over_odds = kwargs.get("over_odds", -110)
+    under_odds = kwargs.get("under_odds", -110)
+    ou = {"ev": None, "sim_pct": None, "side": None, "odds": None}
     if total_line is not None:
         over_raw = float(np.mean(totals > total_line) * 100)
-        fair = 50.0
-        conf = _model_confidence_for_odds(-110)
-        over_pct = conf * over_raw + (1 - conf) * fair
+        over_fair, under_fair = fair_probabilities(over_odds, under_odds)
+        fair_over = (over_fair or 0.5) * 100
+        conf = _model_confidence_for_odds(over_odds)
+        over_pct = conf * over_raw + (1 - conf) * fair_over
         under_pct = 100.0 - over_pct
-        over_ev = calculate_ev(over_pct / 100.0, -110)
-        under_ev = calculate_ev(under_pct / 100.0, -110)
+        over_ev = calculate_ev(over_pct / 100.0, over_odds)
+        under_ev = calculate_ev(under_pct / 100.0, under_odds)
         if over_ev >= under_ev:
-            ou = {"ev": over_ev, "sim_pct": over_pct, "side": "Over", "odds": -110}
+            ou = {"ev": over_ev, "sim_pct": over_pct, "side": "Over", "odds": over_odds}
         else:
-            ou = {"ev": under_ev, "sim_pct": under_pct, "side": "Under", "odds": -110}
+            ou = {"ev": under_ev, "sim_pct": under_pct, "side": "Under", "odds": under_odds}
 
     # --- Moneyline ---
     ml = {"ev": None, "sim_pct": None, "side": None, "odds": None}
@@ -459,6 +459,18 @@ def generate_picks(games, league_avg_rpg=None):
         home_stats = game.get("home_stats")
         away_stats = game.get("away_stats")
 
+        # Parse game time → Chicago time
+        game_time_str = ""
+        raw_time = game.get("game_time", "")
+        if raw_time:
+            try:
+                from zoneinfo import ZoneInfo
+                utc_dt = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+                chi_dt = utc_dt.astimezone(ZoneInfo("America/Chicago"))
+                game_time_str = chi_dt.strftime("%-I:%M %p")
+            except Exception:
+                game_time_str = ""
+
         has_stats = home_stats is not None and away_stats is not None
         has_lines = (run_line is not None or total is not None or
                      (home_ml is not None and away_ml is not None))
@@ -485,7 +497,11 @@ def generate_picks(games, league_avg_rpg=None):
         home_scores, away_scores = monte_carlo_nb(proj_home, proj_away)
 
         edges = calculate_edges(
-            home_scores, away_scores, run_line, total, home_ml, away_ml, has_stats
+            home_scores, away_scores, run_line, total, home_ml, away_ml, has_stats,
+            over_odds=game.get("over_odds", -110),
+            under_odds=game.get("under_odds", -110),
+            home_rl_odds=game.get("home_rl_odds", -110),
+            away_rl_odds=game.get("away_rl_odds", -110),
         )
 
         game_label = f"{away} vs {home}"
@@ -501,6 +517,7 @@ def generate_picks(games, league_avg_rpg=None):
                 all_picks.append(_make_pick(
                     game_label, "Run Line", f"{pick_team} {pick_line:+.1f}",
                     rl, sportsbook, edges, proj_spread, proj_total,
+                    game_time=game_time_str,
                 ))
 
         # --- Over/Under Pick ---
@@ -510,6 +527,7 @@ def generate_picks(games, league_avg_rpg=None):
                 all_picks.append(_make_pick(
                     game_label, "Over/Under", f"{ou['side']} {total}",
                     ou, sportsbook, edges, proj_spread, proj_total,
+                    game_time=game_time_str,
                 ))
 
         # --- Moneyline Pick ---
@@ -521,7 +539,7 @@ def generate_picks(games, league_avg_rpg=None):
                 all_picks.append(_make_pick(
                     game_label, "Moneyline", f"{pick_team} ML",
                     ml, sportsbook, edges, proj_spread, proj_total,
-                    odds_override=f"{pick_ml_odds:+d}",
+                    odds_override=f"{pick_ml_odds:+d}", game_time=game_time_str,
                 ))
 
     # --- Dynamic daily threshold ---
@@ -531,7 +549,7 @@ def generate_picks(games, league_avg_rpg=None):
 
 
 def _make_pick(game_label, bet_type, pick_str, edge_data, sportsbook,
-               edges, proj_spread, proj_total, odds_override=None):
+               edges, proj_spread, proj_total, odds_override=None, game_time=""):
     """Build a pick dict with EV score and continuous unit sizing."""
     ev = edge_data["ev"]
     bet_odds = edge_data.get("odds", -110) or -110
@@ -542,6 +560,7 @@ def _make_pick(game_label, bet_type, pick_str, edge_data, sportsbook,
 
     return {
         "Date": datetime.now().strftime("%Y-%m-%d"),
+        "Time": game_time,
         "Game": game_label,
         "Bet Type": bet_type,
         "Pick": pick_str,
