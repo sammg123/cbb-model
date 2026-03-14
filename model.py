@@ -111,13 +111,13 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     away_rpg = _regress_to_mean(away_stats["rpg"], league_avg_rpg)
     away_rapg = _regress_to_mean(away_stats["ra_pg"], league_avg_rapg)
 
-    # Step 2: SOS adjustment (50% weight)
+    # Step 2: SOS adjustment (65% weight)
     # SOS is critical — a team with 10 RPG against a .28 SOS (weak schedule)
     # is NOT the same as 10 RPG against a .55 SOS (SEC schedule).
-    # We apply SOS only to raw stats BEFORE log5, not inside it.
-    # 50% dampening balances: strong enough to catch schedule inflation,
-    # not so strong that it double-counts with log5's opponent adjustment.
-    SOS_WEIGHT = 0.50
+    # 65% weight is aggressive but necessary — without strong SOS correction,
+    # weak-conference pretenders with inflated stats pollute the picks.
+    # The quality opponent adjustment in Step 5 further reinforces this.
+    SOS_WEIGHT = 0.65
     if league_avg_sos and league_avg_sos > 0:
         home_sos = home_stats.get("sos") or league_avg_sos
         away_sos = away_stats.get("sos") or league_avg_sos
@@ -178,13 +178,20 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     away_rpg *= away_streak_factor * away_margin_factor
 
     # Step 5: Quality opponent adjustment
-    # How a team performs vs quality opponents (>.500 teams) is one of the
-    # strongest signals in college sports. A team beating good teams by +5
-    # is genuinely elite. A team losing to good teams by -10 is pretenders
-    # with inflated stats from weak opponents.
-    # Scale: each +1 run of quality margin adjusts RPG by ~2%
-    QUALITY_WEIGHT = 0.02
-    MIN_QUAL_GAMES = 3  # Need at least 3 quality games for signal
+    # This is THE key differentiator between real teams and pretenders.
+    # How a team performs vs quality opponents (>.500 teams) tells you
+    # if their stats are earned against real competition or inflated
+    # by beating up on weak teams.
+    #
+    # A team with +5 quality margin = dominates good teams = elite
+    # A team with -10 quality margin = gets destroyed by real competition = pretender
+    #
+    # This adjustment is intentionally HEAVY — it's the primary mechanism
+    # for catching schedule-inflated stats. A 3% per run adjustment means:
+    #   +5 quality margin → +15% RPG boost (earned against real teams)
+    #   -8 quality margin → -24% RPG penalty (stats are fool's gold)
+    QUALITY_WEIGHT = 0.03  # 3% per run of quality margin
+    MIN_QUAL_GAMES = 2     # Need at least 2 quality games
 
     home_qm = home_stats.get("_qual_margin", 0)
     home_qg = home_stats.get("_qual_games", 0)
@@ -193,7 +200,9 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
 
     if home_qg >= MIN_QUAL_GAMES:
         reliability = min(home_qg, 8) / 8.0
+        # Boost RPG for teams that dominate quality opponents
         home_rpg *= (1.0 + QUALITY_WEIGHT * home_qm * reliability)
+        # Also adjust defense — teams that dominate good teams also pitch well against them
         home_rapg *= (1.0 - QUALITY_WEIGHT * home_qm * reliability * 0.5)
 
     if away_qg >= MIN_QUAL_GAMES:
@@ -531,20 +540,6 @@ def generate_picks(games, league_avg_rpg=None):
             proj_home, proj_away = project_runs(
                 home_stats_ext, away_stats_ext, league_avg_rpg, league_avg_sos, neutral
             )
-
-            # Blend model total with market total — the market knows things
-            # the model doesn't (starting pitchers, weather, park factors).
-            # Without this, the model projects every game at ~12-13 total
-            # regardless of what the market says, creating systematic Under bias.
-            if total is not None:
-                model_total = proj_home + proj_away
-                TOTAL_MARKET_WEIGHT = 0.50  # 50% model, 50% market
-                blended_total = TOTAL_MARKET_WEIGHT * model_total + (1 - TOTAL_MARKET_WEIGHT) * total
-                # Preserve the model's home/away ratio but scale to blended total
-                if model_total > 0:
-                    ratio = proj_home / model_total
-                    proj_home = blended_total * ratio
-                    proj_away = blended_total * (1 - ratio)
 
         elif run_line is not None and total is not None:
             proj_home, proj_away = project_runs_fallback(run_line, total)
