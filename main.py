@@ -2,6 +2,7 @@
 
 import os
 import re
+import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -12,8 +13,9 @@ from model import generate_picks, picks_to_dataframe
 from sheets import write_picks, update_results_in_all_picks, COLUMNS
 
 
-def merge_game_data(games, team_stats, odds, season_results=None, quality_records=None):
-    """Combine schedule, team stats, odds, common opponent, and quality records into model-ready game dicts."""
+def merge_game_data(games, team_stats, odds, season_results=None, quality_records=None,
+                    recency_stats=None):
+    """Combine schedule, team stats, odds, common opponent, recency, and quality records into model-ready game dicts."""
     merged = []
     matched_count = 0
     no_stats_count = 0
@@ -152,6 +154,10 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
         home_qual = quality_records.get(home_norm, {}) if quality_records else {}
         away_qual = quality_records.get(away_norm, {}) if quality_records else {}
 
+        # Recency-weighted stats
+        home_recency = recency_stats.get(home_norm, {}) if recency_stats else {}
+        away_recency = recency_stats.get(away_norm, {}) if recency_stats else {}
+
         merged.append({
             "home": home,
             "away": away,
@@ -178,6 +184,8 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
             "under_odds": under_odds,
             "home_rl_odds": home_rl_odds,
             "away_rl_odds": away_rl_odds,
+            "home_recent_margin": home_recency.get("recent_margin"),
+            "away_recent_margin": away_recency.get("recent_margin"),
         })
 
         # One pick per game per bet type — no duplicates across books.
@@ -222,6 +230,75 @@ def _build_quality_records(season_results):
         }
 
     return quality
+
+
+def _calculate_recency_stats(season_results):
+    """Calculate recency-weighted offensive and defensive stats.
+
+    Uses exponential decay: recent games matter more.
+    Lambda=0.95 means each game back is worth 95% of the previous.
+
+    Returns dict: {team_norm: {"recent_margin": float, "recent_games": int}}
+    """
+    import numpy as np
+
+    recency = {}
+    for team, games in season_results.items():
+        if not games:
+            continue
+        # Sort by date descending (most recent first)
+        sorted_games = sorted(games, key=lambda x: x[2], reverse=True)
+
+        LAMBDA = 0.95
+        weighted_margins = []
+        weights = []
+        for i, (opp, margin, date_str) in enumerate(sorted_games):
+            w = LAMBDA ** i
+            weighted_margins.append(margin * w)
+            weights.append(w)
+
+        total_w = sum(weights)
+        if total_w > 0:
+            recency[team] = {
+                "recent_margin": sum(weighted_margins) / total_w,
+                "recent_games": len(sorted_games),
+            }
+
+    return recency
+
+
+def _log_picks_for_clv(picks):
+    """Save today's picks with current odds for later CLV calculation.
+
+    Writes to clv_log.json in the project directory. Each entry records
+    the bet details and timestamp so closing odds can be compared later.
+    """
+    clv_file = os.path.join(os.path.dirname(__file__), "clv_log.json")
+    try:
+        with open(clv_file, "r") as f:
+            log = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        log = []
+
+    for pick in picks:
+        log.append({
+            "date": pick.get("Date"),
+            "game": pick.get("Game"),
+            "bet_type": pick.get("Bet Type"),
+            "pick": pick.get("Pick"),
+            "bet_odds": pick.get("Odds"),
+            "sportsbook": pick.get("Sportsbook"),
+            "unit_size": pick.get("Unit Size"),
+            "score": pick.get("Score"),
+            "timestamp": datetime.now().isoformat(),
+            "closing_odds": "",  # To be filled later
+            "clv": "",           # To be calculated: closing_implied - bet_implied
+        })
+
+    with open(clv_file, "w") as f:
+        json.dump(log, f, indent=2)
+
+    print(f"  CLV log: saved {len(picks)} picks to {clv_file}")
 
 
 def _fuzzy(a, b):
@@ -415,13 +492,19 @@ def run_daily():
 
     # Build quality records: how each team performs vs winning opponents
     quality_records = _build_quality_records(season_results)
+
+    # Build recency-weighted stats: recent games matter more
+    recency_stats = _calculate_recency_stats(season_results)
+    print(f"  Recency stats: {len(recency_stats)} teams")
+
     if not games:
         print("No games found for today.")
         return
 
     # Step 3: Merge + cross-check
     print("\n--- Data merge & cross-check ---")
-    merged = merge_game_data(games, team_stats, odds, season_results, quality_records)
+    merged = merge_game_data(games, team_stats, odds, season_results, quality_records,
+                             recency_stats)
     print(f"  Total game entries: {len(merged)}")
 
     # Step 4: Run model
@@ -432,6 +515,9 @@ def run_daily():
     if not picks:
         print("No picks met tier thresholds today.")
         return
+
+    # Step 4b: Log picks for CLV tracking
+    _log_picks_for_clv(picks)
 
     # Step 5: Write to Google Sheets
     df = picks_to_dataframe(picks)

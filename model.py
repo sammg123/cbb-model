@@ -19,7 +19,7 @@ from datetime import datetime
 
 # --- Constants ---
 
-HOME_FIELD_ADV = 0.50           # Runs — college HFA is ~2x MLB's 0.25
+HOME_FIELD_ADV = 0.33           # Runs — Yale NCAA model confirmed 0.33
 SIM_ITERATIONS = 100_000        # Monte Carlo iterations
 D1_AVG_RPG = 6.5                # D1 average runs per game (baseline)
 MIN_LAMBDA = 1.0                # Floor for projected runs
@@ -28,6 +28,14 @@ MAX_LAMBDA = 15.0               # Ceiling for projected runs
 # Negative binomial overdispersion.
 # In baseball, variance ≈ 2.1 × mean. Poisson assumes variance = mean.
 VARIANCE_RATIO = 2.1
+VARIANCE_RATIO_MIDWEEK = 2.3  # Midweek games: weaker pitching = wider distributions
+
+# TODO: Weather integration for totals projection.
+# Plan: detect game region (cold-weather northern states vs warm-weather southern),
+# apply seasonal temperature proxy — March games in northern states score ~0.5 fewer
+# runs than southern states, effect diminishes by May. Could later integrate a free
+# weather API (Weather.gov or OpenWeatherMap) for actual game-day temperature.
+# Each 10F above 70F adds ~0.3 runs to projected total; below 70F subtracts ~0.3.
 
 # Starting pitcher adjustment
 STARTER_IP_PCT_WEEKEND = 0.60
@@ -72,18 +80,21 @@ TARGET_MAX_PICKS = 18
 
 # --- Run Projection ---
 
-def _regress_to_mean(raw_value, league_avg, games_played=17, regression_k=15):
+def _regress_to_mean(raw_value, league_avg, games_played=17, regression_k=None):
     """Regress a raw stat toward the league average based on sample size.
 
     With only 15-20 games early in a college season, raw stats are noisy.
     This blends observed performance with a prior (league average):
       regressed = (games * raw + k * avg) / (games + k)
 
-    regression_k=15 gives ~53% weight on raw stats at 17 games,
-    increasing to ~77% at 50 games. This preserves the model's ability
-    to differentiate between high-scoring and low-scoring games
-    while still dampening extreme outliers.
+    Dynamic k: more aggressive regression early season, less late season.
+    At 17 games: k = 18.2 → weight = 48%
+    At 40 games: k = 9.0  → weight = 82%
+    At 60 games: k = 8.0  → weight = 88%
     """
+    if regression_k is None:
+        # Dynamic: more aggressive early season, less late season
+        regression_k = max(8, 25 - 0.4 * games_played)
     weight = games_played / (games_played + regression_k)
     return weight * raw_value + (1 - weight) * league_avg
 
@@ -148,39 +159,43 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
             home_rapg *= (1.0 + 0.10 * (home_whip / avg_whip - 1.0))
             away_rapg *= (1.0 + 0.10 * (away_whip / avg_whip - 1.0))
 
-    # Step 3b: ERA differential adjustment
-    # ERA was removed as an absolute blend (it caused Under bias because
-    # ERA < RA/G systematically). But the RELATIVE gap between two teams'
-    # ERAs is still informative — if Team A has ERA 2.5 and Team B has 6.0,
-    # that's a strong pitching quality signal beyond RA/G alone.
-    # Apply as a small modifier to the opposing team's projected runs:
-    # each +1 run of ERA differential adjusts opponent's runs by ~1.5%.
-    ERA_DIFF_WEIGHT = 0.015  # 1.5% per run of ERA gap
-    home_era = home_stats.get("era")
-    away_era = away_stats.get("era")
+    # Step 3b: RA9 differential adjustment (or ERA fallback)
+    # RA9 (runs allowed per 9 IP) captures unearned runs that ERA misses.
+    # College baseball has 2x MLB's error rate, so RA9 is more accurate.
+    # Fall back to ERA if RA9 is not available.
+    RA9_DIFF_WEIGHT = 0.015  # 1.5% per run of gap
+    home_ra9 = home_stats.get("ra9") or home_stats.get("era")
+    away_ra9 = away_stats.get("ra9") or away_stats.get("era")
 
-    if home_era is not None and away_era is not None:
-        era_diff = away_era - home_era  # positive = home has better (lower) ERA
+    if home_ra9 is not None and away_ra9 is not None:
+        ra9_diff = away_ra9 - home_ra9  # positive = home has better (lower) RA9
         # Home pitches better → away scores less; away pitches better → home scores less
-        away_rpg *= (1.0 - ERA_DIFF_WEIGHT * max(-4, min(4, era_diff)))
-        home_rpg *= (1.0 + ERA_DIFF_WEIGHT * max(-4, min(4, era_diff)))
+        away_rpg *= (1.0 - RA9_DIFF_WEIGHT * max(-4, min(4, ra9_diff)))
+        home_rpg *= (1.0 + RA9_DIFF_WEIGHT * max(-4, min(4, ra9_diff)))
 
-    # Step 3c: Batting average differential adjustment
-    # BA is already somewhat reflected in RPG, but it provides additional
-    # signal about offensive contact quality. A team hitting .320 vs .240
-    # has a meaningful edge in getting on base and sustaining rallies.
-    # Keep it subtle — 2% per .050 of BA differential (≈ 1 std dev).
-    BA_DIFF_WEIGHT = 0.40  # 2% per .050 BA gap → 0.40 per 1.0 BA gap
-    home_ba = home_stats.get("ba")
-    away_ba = away_stats.get("ba")
+    # Step 3c: JOPS differential — explains 90.9% of runs scored variance
+    # JOPS (3*OBP + SLG) is far more predictive than BA for college baseball.
+    home_jops = home_stats.get("jops")
+    away_jops = away_stats.get("jops")
+    if home_jops is not None and away_jops is not None:
+        jops_diff = home_jops - away_jops
+        # Scale: each 0.1 JOPS difference adjusts RPG by ~2%
+        JOPS_WEIGHT = 0.20  # 2% per 0.1 JOPS gap
+        jops_diff = max(-0.3, min(0.3, jops_diff))
+        home_rpg *= (1.0 + JOPS_WEIGHT * jops_diff)
+        away_rpg *= (1.0 - JOPS_WEIGHT * jops_diff)
 
-    if home_ba is not None and away_ba is not None:
-        ba_diff = home_ba - away_ba  # positive = home hits better
-        # Cap at +/- .100 differential (~2 std devs)
-        ba_diff = max(-0.100, min(0.100, ba_diff))
-        # Team with higher BA gets a small RPG boost
-        home_rpg *= (1.0 + BA_DIFF_WEIGHT * ba_diff)
-        away_rpg *= (1.0 - BA_DIFF_WEIGHT * ba_diff)
+    # Step 3d: Fielding adjustment — college has 2x MLB errors, this matters
+    home_errors = home_stats.get("errors_pg")
+    away_errors = away_stats.get("errors_pg")
+    if home_errors is not None and away_errors is not None:
+        # More errors = more unearned runs allowed
+        # Each extra error per game adds ~0.3 runs to opponent's scoring
+        ERROR_WEIGHT = 0.30
+        avg_errors = (home_errors + away_errors) / 2.0
+        if avg_errors > 0:
+            home_rapg *= (1.0 + ERROR_WEIGHT * (home_errors / avg_errors - 1.0) * 0.15)
+            away_rapg *= (1.0 + ERROR_WEIGHT * (away_errors / avg_errors - 1.0) * 0.15)
 
     # Step 4: Momentum adjustment
     # Teams on hot streaks perform ~2-3% better, cold streaks ~2-3% worse.
@@ -244,7 +259,29 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
         away_rpg *= (1.0 + QUALITY_WEIGHT * away_qm * reliability)
         away_rapg *= (1.0 - QUALITY_WEIGHT * away_qm * reliability * 0.5)
 
-    # Step 5b: Overall winning percentage adjustment
+    # Step 5b: Recency-weighted margin adjustment
+    # Season-long stats treat game 1 and game 20 equally. But recent form
+    # matters — a team that scored +8 margin over the last 5 games is
+    # performing differently than their season line suggests.
+    # The recency margin (exponential decay, lambda=0.95) captures this.
+    # Apply as a small RPG modifier: each +1 run of recent margin adjusts by ~1.5%.
+    RECENCY_WEIGHT = 0.015  # 1.5% per run of recent margin
+    MAX_RECENCY_ADJ = 0.08  # Cap at +/- 8% adjustment
+
+    home_recent_margin = home_stats.get("_recent_margin")
+    away_recent_margin = away_stats.get("_recent_margin")
+
+    if home_recent_margin is not None:
+        adj = RECENCY_WEIGHT * max(-5, min(5, home_recent_margin))
+        adj = max(-MAX_RECENCY_ADJ, min(MAX_RECENCY_ADJ, adj))
+        home_rpg *= (1.0 + adj)
+
+    if away_recent_margin is not None:
+        adj = RECENCY_WEIGHT * max(-5, min(5, away_recent_margin))
+        adj = max(-MAX_RECENCY_ADJ, min(MAX_RECENCY_ADJ, adj))
+        away_rpg *= (1.0 + adj)
+
+    # Step 5c: Overall winning percentage adjustment
     # A team with .800 wpct is genuinely better than one with .400.
     # This is a blunt signal (doesn't account for SOS) but complements
     # the quality margin adjustment above. Applied as a small modifier
@@ -325,20 +362,25 @@ def adjust_for_starter(team_rapg, starter_era, team_era, starter_ip=None,
 
 # --- Monte Carlo Simulation ---
 
-def _nb_params(mean_runs):
+def _nb_params(mean_runs, variance_ratio=None):
     """Calculate Negative Binomial parameters from projected runs."""
-    r = mean_runs / (VARIANCE_RATIO - 1)
+    if variance_ratio is None:
+        variance_ratio = VARIANCE_RATIO
+    r = mean_runs / (variance_ratio - 1)
     p = r / (r + mean_runs)
     return r, p
 
 
-def monte_carlo_nb(lambda_home, lambda_away, n=SIM_ITERATIONS):
-    """Run Negative Binomial Monte Carlo simulation."""
+def monte_carlo_nb(lambda_home, lambda_away, n=SIM_ITERATIONS, variance_ratio=None):
+    """Run Negative Binomial Monte Carlo simulation.
+
+    variance_ratio: override the default VARIANCE_RATIO (e.g. for midweek games).
+    """
     lambda_home = float(np.clip(lambda_home, MIN_LAMBDA, MAX_LAMBDA))
     lambda_away = float(np.clip(lambda_away, MIN_LAMBDA, MAX_LAMBDA))
 
-    r_h, p_h = _nb_params(lambda_home)
-    r_a, p_a = _nb_params(lambda_away)
+    r_h, p_h = _nb_params(lambda_home, variance_ratio)
+    r_a, p_a = _nb_params(lambda_away, variance_ratio)
 
     rng = np.random.default_rng()
     home_scores = rng.negative_binomial(r_h, p_h, n)
@@ -569,6 +611,20 @@ def generate_picks(games, league_avg_rpg=None):
             except Exception:
                 game_time_str = ""
 
+        # Midweek vs weekend detection — midweek games have weaker pitching
+        # on both sides (teams save aces for Fri-Sun conference series).
+        # This means more variance in outcomes, modeled via higher NB variance ratio.
+        is_midweek = False
+        try:
+            game_date = datetime.now()  # default to today
+            # Try parsing from game_time (ISO format from ESPN)
+            if raw_time:
+                game_date = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            day_of_week = game_date.weekday()  # 0=Monday, 6=Sunday
+            is_midweek = day_of_week in (0, 1, 2, 3)  # Mon-Thu
+        except Exception:
+            is_midweek = False
+
         has_stats = home_stats is not None and away_stats is not None
         has_lines = (run_line is not None or total is not None or
                      (home_ml is not None and away_ml is not None))
@@ -591,6 +647,11 @@ def generate_picks(games, league_avg_rpg=None):
             away_stats_ext["_qual_margin"] = game.get("away_qual_margin", 0)
             away_stats_ext["_qual_games"] = game.get("away_qual_games", 0)
             away_stats_ext["_overall_wpct"] = game.get("away_overall_wpct")
+
+            # Inject recency-weighted margin for each team
+            home_stats_ext["_recent_margin"] = game.get("home_recent_margin")
+            away_stats_ext["_recent_margin"] = game.get("away_recent_margin")
+
             proj_home, proj_away = project_runs(
                 home_stats_ext, away_stats_ext, league_avg_rpg, league_avg_sos, neutral
             )
@@ -601,7 +662,9 @@ def generate_picks(games, league_avg_rpg=None):
             continue
 
         # Negative Binomial Monte Carlo
-        home_scores, away_scores = monte_carlo_nb(proj_home, proj_away)
+        # Midweek games use higher variance ratio (weaker pitching = more unpredictable)
+        vr = VARIANCE_RATIO_MIDWEEK if is_midweek else None
+        home_scores, away_scores = monte_carlo_nb(proj_home, proj_away, variance_ratio=vr)
 
         edges = calculate_edges(
             home_scores, away_scores, run_line, total, home_ml, away_ml, has_stats,

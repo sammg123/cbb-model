@@ -297,10 +297,12 @@ def get_team_stats(year=None):
     """Scrape team stats from WarrenNolan + NCAA API.
 
     Sources:
-      - WarrenNolan: RPG, RA/G, SOS (308 teams)
-      - NCAA API: team ERA, WHIP, BA (300 teams)
+      - WarrenNolan: RPG, RA/G, SOS, errors/game (308 teams)
+      - NCAA API: team ERA, WHIP, BA, OBP, RA9, SLG (calculated), JOPS (300 teams)
 
-    Returns dict: {team_name: {"rpg", "ra_pg", "sos", "era", "whip", "ba"}}
+    Returns dict: {team_name: {"rpg", "ra_pg", "sos", "era", "whip", "ba",
+                                "ra9", "obp", "slg", "jops", "errors_pg",
+                                "margin", "momentum"}}
     """
     if year is None:
         year = datetime.now().year
@@ -311,12 +313,35 @@ def get_team_stats(year=None):
     margin_stats = _scrape_warren_nolan_stat(year, "stats-off-scoring-margin")
     win_streaks = _scrape_warren_nolan_stat(year, "stats-streaks-current-wins")
     loss_streaks = _scrape_warren_nolan_stat(year, "stats-streaks-current-losses")
+    error_stats = _scrape_warren_nolan_stat(year, "stats-def-errors-per-game")
     sos_data = _scrape_warren_nolan_sos(year)
 
     # NCAA API team pitching + batting stats
-    ncaa_era = _fetch_ncaa_team_stat(211)    # ERA
+    era_rows = _fetch_ncaa_team_stat_raw(211)   # ERA (raw — also used for RA9)
+    ncaa_era = {}
+    for row in era_rows:
+        team = row.get("Team", "").strip()
+        if not team:
+            continue
+        try:
+            ncaa_era[normalize_name(team)] = float(row.get("ERA", "0").replace(",", "").strip())
+        except (ValueError, TypeError):
+            pass
+
+    ncaa_ra9 = _compute_ra9_from_era_rows(era_rows)
     ncaa_whip = _fetch_ncaa_team_stat(597)   # WHIP
     ncaa_ba = _fetch_ncaa_team_stat(210)     # Batting Average
+
+    # OBP from NCAA API (stat 589)
+    ncaa_obp = _fetch_ncaa_team_stat(589)    # On Base Percentage
+
+    # SLG: not directly available — calculate from component stats
+    # BA stat (210) has AB, H; doubles (489), triples (491), home runs (513)
+    ba_rows = _fetch_ncaa_team_stat_raw(210)
+    ncaa_doubles = _fetch_ncaa_counting_stat(489, "2B")
+    ncaa_triples = _fetch_ncaa_counting_stat(491, "3B")
+    ncaa_hr = _fetch_ncaa_counting_stat(513, "HR")
+    ncaa_slg = _compute_slg_from_components(ba_rows, ncaa_doubles, ncaa_triples, ncaa_hr)
 
     if not off_stats and not def_stats:
         print("Warning: Could not load team stats from WarrenNolan")
@@ -334,27 +359,42 @@ def get_team_stats(year=None):
             l_streak = loss_streaks.get(team, 0)
             momentum = w_streak if w_streak > 0 else -l_streak
 
+            # Calculate JOPS = 3*OBP + SLG (explains 90.9% of runs scored variance)
+            obp = ncaa_obp.get(team)
+            slg = ncaa_slg.get(team)
+            jops = None
+            if obp is not None and slg is not None:
+                jops = 3.0 * obp + slg
+
             stats[team] = {
                 "rpg": rpg,
                 "ra_pg": ra_pg,
                 "sos": sos_data.get(team),
                 "era": ncaa_era.get(team),
+                "ra9": ncaa_ra9.get(team),
                 "whip": ncaa_whip.get(team),
                 "ba": ncaa_ba.get(team),
+                "obp": obp,
+                "slg": slg,
+                "jops": jops,
+                "errors_pg": error_stats.get(team),
                 "margin": margin_stats.get(team, 0),  # avg scoring margin per game
                 "momentum": momentum,                   # +N = win streak, -N = loss streak
             }
 
     ncaa_count = sum(1 for s in stats.values() if s.get("era") is not None)
+    jops_count = sum(1 for s in stats.values() if s.get("jops") is not None)
+    ra9_count = sum(1 for s in stats.values() if s.get("ra9") is not None)
+    errors_count = sum(1 for s in stats.values() if s.get("errors_pg") is not None)
     margin_count = sum(1 for s in stats.values() if s.get("margin", 0) != 0)
-    print(f"Loaded stats for {len(stats)} teams (WarrenNolan + {ncaa_count} ERA/WHIP + {margin_count} margin/momentum)")
+    print(f"Loaded stats for {len(stats)} teams (WarrenNolan + {ncaa_count} ERA/WHIP + {jops_count} JOPS + {ra9_count} RA9 + {errors_count} errors + {margin_count} margin/momentum)")
     return stats
 
 
-def _fetch_ncaa_team_stat(stat_seq, max_pages=8):
-    """Fetch a team stat from the NCAA API (all pages).
+def _fetch_ncaa_team_stat_raw(stat_seq, max_pages=8):
+    """Fetch raw team stat rows from the NCAA API (all pages).
 
-    Returns dict: {normalized_team_name: float_value}
+    Returns list of row dicts with all columns intact.
     """
     import time as _time
     all_rows = []
@@ -376,6 +416,15 @@ def _fetch_ncaa_team_stat(stat_seq, max_pages=8):
         except Exception:
             break
         _time.sleep(0.25)
+    return all_rows
+
+
+def _fetch_ncaa_team_stat(stat_seq, max_pages=8):
+    """Fetch a team stat from the NCAA API (all pages).
+
+    Returns dict: {normalized_team_name: float_value}
+    """
+    all_rows = _fetch_ncaa_team_stat_raw(stat_seq, max_pages)
 
     # Parse: find the numeric stat column (last column that's a float)
     result = {}
@@ -385,12 +434,18 @@ def _fetch_ncaa_team_stat(stat_seq, max_pages=8):
             continue
 
         # The stat value is the last column (ERA, WHIP, or BA)
-        # Try common column names
+        # Try common column names, plus PCT for OBP
         value = None
-        for col in ["ERA", "WHIP", "BA"]:
+        for col in ["ERA", "WHIP", "BA", "PCT"]:
             if col in row:
                 try:
-                    value = float(row[col].replace(",", "").strip())
+                    raw = row[col].replace(",", "").strip().lstrip(".")
+                    # PCT values like ".528" — restore leading dot
+                    if row[col].strip().startswith("."):
+                        raw = row[col].strip()
+                    else:
+                        raw = row[col].replace(",", "").strip()
+                    value = float(raw)
                     break
                 except (ValueError, TypeError):
                     pass
@@ -398,6 +453,82 @@ def _fetch_ncaa_team_stat(stat_seq, max_pages=8):
         if value is not None:
             result[normalize_name(team)] = value
 
+    return result
+
+
+def _compute_ra9_from_era_rows(era_rows):
+    """Compute RA9 (runs allowed per 9 innings) from ERA stat rows.
+
+    ERA rows contain R (total runs) and IP (innings pitched) columns.
+    RA9 = (R / IP) * 9 — captures unearned runs that ERA misses.
+    """
+    result = {}
+    for row in era_rows:
+        team = row.get("Team", "").strip()
+        if not team:
+            continue
+        try:
+            r = float(row.get("R", "0").replace(",", "").strip())
+            ip = float(row.get("IP", "0").replace(",", "").strip())
+            if ip > 0:
+                result[normalize_name(team)] = (r / ip) * 9.0
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
+def _compute_slg_from_components(ba_rows, doubles_data, triples_data, hr_data):
+    """Compute SLG from component stats when direct SLG stat is unavailable.
+
+    SLG = Total Bases / AB
+    Total Bases = 1B + 2*2B + 3*3B + 4*HR
+    where 1B = H - 2B - 3B - HR
+
+    ba_rows: raw rows from BA stat (has Team, AB, H)
+    doubles_data: {team: num_doubles}
+    triples_data: {team: num_triples}
+    hr_data: {team: num_hr}
+    """
+    result = {}
+    for row in ba_rows:
+        team = row.get("Team", "").strip()
+        if not team:
+            continue
+        try:
+            ab = float(row.get("AB", "0").replace(",", "").strip())
+            h = float(row.get("H", "0").replace(",", "").strip())
+            if ab <= 0:
+                continue
+            norm = normalize_name(team)
+            d = doubles_data.get(norm, 0)
+            t = triples_data.get(norm, 0)
+            hr = hr_data.get(norm, 0)
+            singles = h - d - t - hr
+            if singles < 0:
+                singles = 0
+            total_bases = singles + 2 * d + 3 * t + 4 * hr
+            result[norm] = total_bases / ab
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
+def _fetch_ncaa_counting_stat(stat_seq, col_name, max_pages=8):
+    """Fetch a counting stat from the NCAA API and return {team_norm: value}.
+
+    col_name: the column name in the response (e.g. '2B', '3B', 'HR')
+    """
+    all_rows = _fetch_ncaa_team_stat_raw(stat_seq, max_pages)
+    result = {}
+    for row in all_rows:
+        team = row.get("Team", "").strip()
+        if not team:
+            continue
+        try:
+            val = float(row.get(col_name, "0").replace(",", "").strip())
+            result[normalize_name(team)] = val
+        except (ValueError, TypeError):
+            continue
     return result
 
 
