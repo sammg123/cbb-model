@@ -529,18 +529,18 @@ def _min_edge_for_odds(american_odds):
 
     if american_odds > 0:
         if american_odds >= 500:
-            return 0.20
+            return 0.30   # 30% edge — almost impossible to pass, as it should be
         elif american_odds >= 300:
-            return 0.15
+            return 0.20
         elif american_odds >= 200:
-            return 0.10
+            return 0.12
         else:
             return 0.05
     else:
         if american_odds <= -400:
-            return 0.12
+            return 0.15
         elif american_odds <= -250:
-            return 0.08
+            return 0.10
         else:
             return 0.05
 
