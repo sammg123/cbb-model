@@ -234,6 +234,55 @@ def _fuzzy(a, b):
     return False
 
 
+def _get_ncaa_results(date_str):
+    """Get ALL D1 results from NCAA API (164+ games vs ESPN's 6).
+
+    date_str: YYYY-MM-DD format
+    Returns same format as get_game_results: {"Away vs Home": {"home": str, "away": str, "home_score": int, "away_score": int}}
+    """
+    import requests
+    from scraper import normalize_name, NCAA_API_BASE
+
+    url = f"{NCAA_API_BASE}/scoreboard/baseball/d1/{date_str.replace('-', '/')}"
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+    except Exception:
+        return {}
+
+    results = {}
+    for g in data.get("games", []):
+        game = g.get("game", {})
+        if game.get("gameState") != "final":
+            continue
+
+        home_info = game.get("home", {})
+        away_info = game.get("away", {})
+        home_name = home_info.get("names", {}).get("short", "")
+        away_name = away_info.get("names", {}).get("short", "")
+
+        try:
+            home_score = int(home_info.get("score", 0))
+            away_score = int(away_info.get("score", 0))
+        except (ValueError, TypeError):
+            continue
+
+        if not home_name or not away_name:
+            continue
+
+        game_key = f"{away_name} vs {home_name}"
+        results[game_key] = {
+            "home": home_name,
+            "away": away_name,
+            "home_score": home_score,
+            "away_score": away_score,
+        }
+
+    return results
+
+
 def settle_yesterdays_bets():
     """Check yesterday's results and update the All Picks tab."""
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -241,7 +290,16 @@ def settle_yesterdays_bets():
 
     print(f"\n=== Settling bets for {yesterday} ===")
 
-    results = get_game_results(yesterday_espn)
+    # Use NCAA API (164+ games) as primary, ESPN as fallback
+    results = _get_ncaa_results(yesterday)
+    espn_results = get_game_results(yesterday_espn)
+    # Merge ESPN results in (NCAA API might miss some name formats)
+    for key, val in espn_results.items():
+        if key not in results:
+            results[key] = val
+
+    print(f"Found {len(results)} final results (NCAA API + ESPN)")
+
     if not results:
         print("No final results found for yesterday.")
         return
