@@ -30,12 +30,34 @@ MAX_LAMBDA = 15.0               # Ceiling for projected runs
 VARIANCE_RATIO = 2.1
 VARIANCE_RATIO_MIDWEEK = 2.3  # Midweek games: weaker pitching = wider distributions
 
-# TODO: Weather integration for totals projection.
-# Plan: detect game region (cold-weather northern states vs warm-weather southern),
-# apply seasonal temperature proxy — March games in northern states score ~0.5 fewer
-# runs than southern states, effect diminishes by May. Could later integrate a free
-# weather API (Weather.gov or OpenWeatherMap) for actual game-day temperature.
-# Each 10F above 70F adds ~0.3 runs to projected total; below 70F subtracts ~0.3.
+COLD_REGION_KEYWORDS = {
+    "michigan", "minnesota", "wisconsin", "iowa", "illinois", "indiana",
+    "ohio", "nebraska", "penn", "pennsylvania", "new york", "rutgers",
+    "connecticut", "uconn", "massachusetts", "umass", "maine", "vermont",
+    "new hampshire", "rhode island", "montana", "north dakota", "south dakota",
+    "wyoming", "colorado", "oregon", "washington", "purdue", "northwestern",
+    "notre dame", "boston", "cornell", "columbia", "princeton", "yale",
+    "harvard", "dartmouth", "brown", "maryland", "virginia tech", "west virginia",
+    "pittsburgh", "cincinnati", "kansas", "missouri",
+}
+
+
+def _weather_total_adjustment(home_team_name, game_month):
+    """Regional temperature proxy -- cold-weather parks depress scoring in early season."""
+    if game_month is None or game_month >= 5:  # May+ = warm everywhere
+        return 0.0
+
+    home_lower = home_team_name.lower() if home_team_name else ""
+    is_cold = any(kw in home_lower for kw in COLD_REGION_KEYWORDS)
+
+    if not is_cold:
+        return 0.0
+
+    if game_month <= 3:   # March
+        return -0.40
+    elif game_month == 4:  # April
+        return -0.20
+    return 0.0
 
 # Starting pitcher adjustment
 STARTER_IP_PCT_WEEKEND = 0.60
@@ -80,12 +102,16 @@ TARGET_MAX_PICKS = 18
 
 # --- Run Projection ---
 
-def _regress_to_mean(raw_value, league_avg, games_played=17, regression_k=None):
-    """Regress a raw stat toward the league average based on sample size.
+def _regress_to_mean(raw_value, league_avg, games_played=17, regression_k=None, prior=None):
+    """Regress a raw stat toward the league average (or prior year value) based on sample size.
 
     With only 15-20 games early in a college season, raw stats are noisy.
-    This blends observed performance with a prior (league average):
-      regressed = (games * raw + k * avg) / (games + k)
+    This blends observed performance with a prior (league average or prior year):
+      regressed = (games * raw + k * anchor) / (games + k)
+
+    If prior year data is available, use it as the anchor instead of league avg.
+    This gives team-specific Bayesian priors: a team that scored 8 RPG last year
+    is regressed toward 8 RPG, not the league-wide 6.5.
 
     Dynamic k: more aggressive regression early season, less late season.
     At 17 games: k = 18.2 → weight = 48%
@@ -96,7 +122,8 @@ def _regress_to_mean(raw_value, league_avg, games_played=17, regression_k=None):
         # Dynamic: more aggressive early season, less late season
         regression_k = max(8, 25 - 0.4 * games_played)
     weight = games_played / (games_played + regression_k)
-    return weight * raw_value + (1 - weight) * league_avg
+    anchor = prior if prior is not None else league_avg
+    return weight * raw_value + (1 - weight) * anchor
 
 
 def project_runs(home_stats, away_stats, league_avg_rpg=None,
@@ -113,14 +140,15 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     if league_avg_rpg is None or league_avg_rpg <= 0:
         league_avg_rpg = D1_AVG_RPG
 
-    # Step 1: Regress stats toward league average
+    # Step 1: Regress stats toward league average (or prior year if available)
     # Early season (17 games): ~40% weight on raw stats
     # Late season (50 games): ~67% weight on raw stats
+    # Prior year data provides team-specific anchors instead of league avg
     league_avg_rapg = league_avg_rpg  # RA/G ≈ RPG league-wide
-    home_rpg = _regress_to_mean(home_stats["rpg"], league_avg_rpg)
-    home_rapg = _regress_to_mean(home_stats["ra_pg"], league_avg_rapg)
-    away_rpg = _regress_to_mean(away_stats["rpg"], league_avg_rpg)
-    away_rapg = _regress_to_mean(away_stats["ra_pg"], league_avg_rapg)
+    home_rpg = _regress_to_mean(home_stats["rpg"], league_avg_rpg, prior=home_stats.get("_prior_rpg"))
+    home_rapg = _regress_to_mean(home_stats["ra_pg"], league_avg_rapg, prior=home_stats.get("_prior_rapg"))
+    away_rpg = _regress_to_mean(away_stats["rpg"], league_avg_rpg, prior=away_stats.get("_prior_rpg"))
+    away_rapg = _regress_to_mean(away_stats["ra_pg"], league_avg_rapg, prior=away_stats.get("_prior_rapg"))
 
     # Step 2: SOS adjustment (65% weight)
     # SOS is critical — a team with 10 RPG against a .28 SOS (weak schedule)
@@ -196,6 +224,16 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
         if avg_errors > 0:
             home_rapg *= (1.0 + ERROR_WEIGHT * (home_errors / avg_errors - 1.0) * 0.15)
             away_rapg *= (1.0 + ERROR_WEIGHT * (away_errors / avg_errors - 1.0) * 0.15)
+
+    # Step 3e: K/BB ratio — high strikeout-to-walk ratio = better run prevention
+    home_kbb = home_stats.get("kbb_ratio")
+    away_kbb = away_stats.get("kbb_ratio")
+    if home_kbb is not None and away_kbb is not None:
+        avg_kbb = (home_kbb + away_kbb) / 2.0
+        if avg_kbb > 0:
+            KBB_WEIGHT = 0.05
+            home_rapg *= (1.0 - KBB_WEIGHT * (home_kbb / avg_kbb - 1.0))
+            away_rapg *= (1.0 - KBB_WEIGHT * (away_kbb / avg_kbb - 1.0))
 
     # Step 4: Momentum adjustment
     # Teams on hot streaks perform ~2-3% better, cold streaks ~2-3% worse.
@@ -652,6 +690,27 @@ def generate_picks(games, league_avg_rpg=None):
             home_stats_ext["_recent_margin"] = game.get("home_recent_margin")
             away_stats_ext["_recent_margin"] = game.get("away_recent_margin")
 
+            # Inject prior year stats for Bayesian regression anchors
+            home_stats_ext["_prior_rpg"] = game.get("home_prior_rpg")
+            home_stats_ext["_prior_rapg"] = game.get("home_prior_rapg")
+            away_stats_ext["_prior_rpg"] = game.get("away_prior_rpg")
+            away_stats_ext["_prior_rapg"] = game.get("away_prior_rapg")
+
+            # Starting pitcher: adjust RA/G before projection
+            if game.get("home_starter_era") is not None and game.get("home_team_era"):
+                adjusted_rapg = adjust_for_starter(
+                    home_stats_ext["ra_pg"], game["home_starter_era"], game["home_team_era"],
+                    starter_ip=game.get("home_starter_ip"), is_weekend=not is_midweek
+                )
+                home_stats_ext["ra_pg"] = adjusted_rapg
+
+            if game.get("away_starter_era") is not None and game.get("away_team_era"):
+                adjusted_rapg = adjust_for_starter(
+                    away_stats_ext["ra_pg"], game["away_starter_era"], game["away_team_era"],
+                    starter_ip=game.get("away_starter_ip"), is_weekend=not is_midweek
+                )
+                away_stats_ext["ra_pg"] = adjusted_rapg
+
             proj_home, proj_away = project_runs(
                 home_stats_ext, away_stats_ext, league_avg_rpg, league_avg_sos, neutral
             )
@@ -660,6 +719,29 @@ def generate_picks(games, league_avg_rpg=None):
             proj_home, proj_away = project_runs_fallback(run_line, total)
         else:
             continue
+
+        # Weather adjustment: cold regions depress totals early season
+        game_month = None
+        try:
+            if raw_time:
+                game_month = datetime.fromisoformat(raw_time.replace("Z", "+00:00")).month
+            else:
+                game_month = datetime.now().month
+        except Exception:
+            game_month = datetime.now().month
+
+        weather_adj = _weather_total_adjustment(home, game_month)
+        if weather_adj != 0 and (proj_home + proj_away) > 0:
+            ratio = (proj_home + proj_away + weather_adj) / (proj_home + proj_away)
+            proj_home *= max(0.5, ratio)
+            proj_away *= max(0.5, ratio)
+
+        # Park factor — hitter/pitcher friendly home environment
+        park_factor = game.get("park_factor", 1.0)
+        if park_factor != 1.0:
+            effective_pf = 1.0 + 0.50 * (park_factor - 1.0)  # 50% dampening
+            proj_home *= effective_pf
+            proj_away *= effective_pf
 
         # Negative Binomial Monte Carlo
         # Midweek games use higher variance ratio (weaker pitching = more unpredictable)

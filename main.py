@@ -8,13 +8,31 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from scraper import get_schedule, get_team_stats, get_odds, get_game_results, match_team, normalize_name, get_season_results, common_opponent_edge
+from scraper import get_schedule, get_team_stats, get_odds, get_game_results, match_team, normalize_name, get_season_results, common_opponent_edge, get_pitcher_stats, get_starters_from_espn, get_team_eras, load_prior_year_stats, save_season_stats
 from model import generate_picks, picks_to_dataframe
 from sheets import write_picks, update_results_in_all_picks, COLUMNS
 
 
+def _match_starter(starter_name, team_name, pitcher_db):
+    """Match ESPN starter name to NCAA pitcher database."""
+    if not starter_name:
+        return None
+    team_norm = normalize_name(team_name)
+    # Exact match
+    key = (team_norm, starter_name)
+    if key in pitcher_db:
+        return pitcher_db[key]
+    # Last name fuzzy match
+    last = starter_name.split()[-1].lower() if starter_name else ""
+    for (t, name), stats in pitcher_db.items():
+        if t.lower() == team_norm.lower() and name.split()[-1].lower() == last:
+            return stats
+    return None
+
+
 def merge_game_data(games, team_stats, odds, season_results=None, quality_records=None,
-                    recency_stats=None):
+                    recency_stats=None, starters=None, pitcher_db=None,
+                    team_eras_db=None, prior_stats=None, park_factors=None):
     """Combine schedule, team stats, odds, common opponent, recency, and quality records into model-ready game dicts."""
     merged = []
     matched_count = 0
@@ -158,6 +176,36 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
         home_recency = recency_stats.get(home_norm, {}) if recency_stats else {}
         away_recency = recency_stats.get(away_norm, {}) if recency_stats else {}
 
+        # Starting pitcher data (if available)
+        home_starter_era = None
+        home_starter_ip = None
+        away_starter_era = None
+        away_starter_ip = None
+        home_team_era = None
+        away_team_era = None
+
+        espn_id = game.get("espn_id", "")
+        if starters and pitcher_db and espn_id in starters:
+            starter_info = starters[espn_id]
+            hs = _match_starter(starter_info.get("home_starter"), home, pitcher_db)
+            if hs:
+                home_starter_era = hs.get("era")
+                home_starter_ip = hs.get("ip")
+                home_team_era = team_eras_db.get(normalize_name(home)) if team_eras_db else None
+
+            aws = _match_starter(starter_info.get("away_starter"), away, pitcher_db)
+            if aws:
+                away_starter_era = aws.get("era")
+                away_starter_ip = aws.get("ip")
+                away_team_era = team_eras_db.get(normalize_name(away)) if team_eras_db else None
+
+        # Prior year Bayesian priors
+        home_prior = prior_stats.get(home_norm, {}) if prior_stats else {}
+        away_prior = prior_stats.get(away_norm, {}) if prior_stats else {}
+
+        # Park factor for home team
+        home_pf = park_factors.get(home_norm, 1.0) if park_factors else 1.0
+
         merged.append({
             "home": home,
             "away": away,
@@ -186,6 +234,17 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
             "away_rl_odds": away_rl_odds,
             "home_recent_margin": home_recency.get("recent_margin"),
             "away_recent_margin": away_recency.get("recent_margin"),
+            "home_starter_era": home_starter_era,
+            "home_starter_ip": home_starter_ip,
+            "away_starter_era": away_starter_era,
+            "away_starter_ip": away_starter_ip,
+            "home_team_era": home_team_era,
+            "away_team_era": away_team_era,
+            "home_prior_rpg": home_prior.get("rpg"),
+            "home_prior_rapg": home_prior.get("ra_pg"),
+            "away_prior_rpg": away_prior.get("rpg"),
+            "away_prior_rapg": away_prior.get("ra_pg"),
+            "park_factor": home_pf,
         })
 
         # One pick per game per bet type — no duplicates across books.
@@ -208,8 +267,8 @@ def _build_quality_records(season_results):
     # First pass: overall records
     team_records = {}
     for team, games in season_results.items():
-        wins = sum(1 for _, margin, _ in games if margin > 0)
-        losses = sum(1 for _, margin, _ in games if margin < 0)
+        wins = sum(1 for _, margin, *_ in games if margin > 0)
+        losses = sum(1 for _, margin, *_ in games if margin < 0)
         total = wins + losses
         team_records[team] = {"wpct": wins / total if total > 0 else 0.5, "games": total}
 
@@ -217,7 +276,7 @@ def _build_quality_records(season_results):
     quality = {}
     for team, games in season_results.items():
         margins_vs_good = []
-        for opp, margin, _ in games:
+        for opp, margin, *_ in games:
             opp_rec = team_records.get(opp, {})
             if opp_rec.get("wpct", 0) > 0.500:
                 margins_vs_good.append(margin)
@@ -252,7 +311,7 @@ def _calculate_recency_stats(season_results):
         LAMBDA = 0.95
         weighted_margins = []
         weights = []
-        for i, (opp, margin, date_str) in enumerate(sorted_games):
+        for i, (opp, margin, date_str, *_) in enumerate(sorted_games):
             w = LAMBDA ** i
             weighted_margins.append(margin * w)
             weights.append(w)
@@ -265,6 +324,43 @@ def _calculate_recency_stats(season_results):
             }
 
     return recency
+
+
+def _calculate_park_factors(season_results):
+    """Calculate park factors from home vs away scoring.
+
+    Park factor = avg total runs in home games / avg total runs in away games.
+    >1.0 = hitter-friendly park, <1.0 = pitcher-friendly.
+    """
+    park_factors = {}
+    for team, games in season_results.items():
+        home_totals = []
+        away_totals = []
+        for entry in games:
+            if len(entry) >= 4:
+                opp, margin, date, is_home = entry[0], entry[1], entry[2], entry[3]
+            else:
+                continue
+            # Total runs in game ~ |margin| + 2 * min_score, but we don't have individual scores
+            # Instead, use margin as a proxy -- home margins vs away margins
+            # Actually, just track average margin differential
+            if is_home:
+                home_totals.append(margin)
+            else:
+                away_totals.append(margin)
+
+        if len(home_totals) >= 3 and len(away_totals) >= 3:
+            home_avg = sum(home_totals) / len(home_totals)
+            away_avg = sum(away_totals) / len(away_totals)
+            # Park factor based on how much better team performs at home
+            # Positive diff = team scores more at home relative to away
+            margin_diff = home_avg - away_avg
+            # Convert to a multiplicative factor centered at 1.0
+            # Each +1 run margin at home ~ +3% park factor
+            pf = 1.0 + 0.03 * margin_diff
+            park_factors[team] = max(0.90, min(1.10, pf))
+
+    return park_factors
 
 
 def _log_picks_for_clv(picks):
@@ -486,12 +582,22 @@ def run_daily():
 
     # Fetch all data sources
     team_stats = get_team_stats()
+    pitcher_db = get_pitcher_stats()
+    team_eras_db = get_team_eras(pitcher_db)
     odds, odds_api_raw = get_odds(today)
     games = get_schedule(today, odds_data=odds_api_raw)
+    starters = get_starters_from_espn(games)
+    print(f"  Starters: {len(starters)} games, Pitcher DB: {len(pitcher_db)} pitchers")
     season_results = get_season_results(days_back=25)
+
+    # Load prior year stats for Bayesian priors
+    prior_stats = load_prior_year_stats()
 
     # Build quality records: how each team performs vs winning opponents
     quality_records = _build_quality_records(season_results)
+
+    # Build park factors from home vs away scoring differentials
+    park_factors = _calculate_park_factors(season_results)
 
     # Build recency-weighted stats: recent games matter more
     recency_stats = _calculate_recency_stats(season_results)
@@ -504,7 +610,9 @@ def run_daily():
     # Step 3: Merge + cross-check
     print("\n--- Data merge & cross-check ---")
     merged = merge_game_data(games, team_stats, odds, season_results, quality_records,
-                             recency_stats)
+                             recency_stats, starters=starters, pitcher_db=pitcher_db,
+                             team_eras_db=team_eras_db, prior_stats=prior_stats,
+                             park_factors=park_factors)
     print(f"  Total game entries: {len(merged)}")
 
     # Step 4: Run model
@@ -523,6 +631,10 @@ def run_daily():
     df = picks_to_dataframe(picks)
     url = write_picks(df)
     print(f"\nSheet URL: {url}")
+
+    # Auto-archive stats at end of season (July+)
+    if datetime.now().month >= 7:
+        save_season_stats(team_stats)
 
     # Print summary
     print(f"\n=== Today's Picks Summary ===")

@@ -343,6 +343,9 @@ def get_team_stats(year=None):
     ncaa_hr = _fetch_ncaa_counting_stat(513, "HR")
     ncaa_slg = _compute_slg_from_components(ba_rows, ncaa_doubles, ncaa_triples, ncaa_hr)
 
+    # K/BB ratio (Strikeout-to-Walk Ratio) from NCAA API
+    ncaa_kbb = _fetch_ncaa_team_stat(591)  # Strikeout-to-Walk Ratio
+
     if not off_stats and not def_stats:
         print("Warning: Could not load team stats from WarrenNolan")
         return {}
@@ -378,6 +381,7 @@ def get_team_stats(year=None):
                 "slg": slg,
                 "jops": jops,
                 "errors_pg": error_stats.get(team),
+                "kbb_ratio": ncaa_kbb.get(team),
                 "margin": margin_stats.get(team, 0),  # avg scoring margin per game
                 "momentum": momentum,                   # +N = win streak, -N = loss streak
             }
@@ -386,8 +390,9 @@ def get_team_stats(year=None):
     jops_count = sum(1 for s in stats.values() if s.get("jops") is not None)
     ra9_count = sum(1 for s in stats.values() if s.get("ra9") is not None)
     errors_count = sum(1 for s in stats.values() if s.get("errors_pg") is not None)
+    kbb_count = sum(1 for s in stats.values() if s.get("kbb_ratio") is not None)
     margin_count = sum(1 for s in stats.values() if s.get("margin", 0) != 0)
-    print(f"Loaded stats for {len(stats)} teams (WarrenNolan + {ncaa_count} ERA/WHIP + {jops_count} JOPS + {ra9_count} RA9 + {errors_count} errors + {margin_count} margin/momentum)")
+    print(f"Loaded stats for {len(stats)} teams (WarrenNolan + {ncaa_count} ERA/WHIP + {jops_count} JOPS + {ra9_count} RA9 + {errors_count} errors + {kbb_count} K/BB + {margin_count} margin/momentum)")
     return stats
 
 
@@ -436,7 +441,7 @@ def _fetch_ncaa_team_stat(stat_seq, max_pages=8):
         # The stat value is the last column (ERA, WHIP, or BA)
         # Try common column names, plus PCT for OBP
         value = None
-        for col in ["ERA", "WHIP", "BA", "PCT"]:
+        for col in ["ERA", "WHIP", "BA", "PCT", "K/BB", "Ratio"]:
             if col in row:
                 try:
                     raw = row[col].replace(",", "").strip().lstrip(".")
@@ -877,10 +882,10 @@ def get_season_results(days_back=25):
             margin = home_score - away_score
 
             results_by_team.setdefault(home_norm, []).append(
-                (away_norm, margin, date_label)
+                (away_norm, margin, date_label, True)
             )
             results_by_team.setdefault(away_norm, []).append(
-                (home_norm, -margin, date_label)
+                (home_norm, -margin, date_label, False)
             )
             total_games += 1
 
@@ -910,11 +915,11 @@ def common_opponent_edge(team_a_norm, team_b_norm, results_by_team):
 
     # Build opponent -> [margins] for each team
     a_by_opp = {}
-    for opp, margin, _ in a_games:
+    for opp, margin, *_ in a_games:
         a_by_opp.setdefault(opp, []).append(margin)
 
     b_by_opp = {}
-    for opp, margin, _ in b_games:
+    for opp, margin, *_ in b_games:
         b_by_opp.setdefault(opp, []).append(margin)
 
     # Find common opponents (exclude head-to-head)
@@ -1456,6 +1461,31 @@ def _scrape_espn_odds(date_str=None):
             odds[key] = book_odds
 
     return odds
+
+
+def save_season_stats(team_stats, filename="prior_year_stats.json"):
+    """Archive current season's team stats for next year's Bayesian priors."""
+    path = os.path.join(os.path.dirname(__file__), filename)
+    serializable = {}
+    for team, stats in team_stats.items():
+        serializable[team] = {k: v for k, v in stats.items() if v is not None}
+    data = {"year": datetime.now().year, "saved_at": datetime.now().isoformat(), "teams": serializable}
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"Saved {len(serializable)} team stats to {path}")
+
+
+def load_prior_year_stats(filename="prior_year_stats.json"):
+    """Load last year's team stats for Bayesian priors."""
+    path = os.path.join(os.path.dirname(__file__), filename)
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        teams = data.get("teams", {})
+        print(f"Loaded {len(teams)} prior year team stats from {path}")
+        return teams
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 
 if __name__ == "__main__":
