@@ -77,6 +77,12 @@ MODEL_CONFIDENCE_MIN = 0.45     # Trust model 45% on extreme lines (+500/-500)
 # Below that, the edge is likely noise. Above it, you're exploiting a lazy line.
 MIN_EV_THRESHOLD = 0.03  # 3% EV minimum to show
 
+# Maximum ML odds — don't pick extreme longshots. +400 means 4-to-1 underdog.
+# Beyond this, the model's edge is almost certainly noise, not real value.
+# Even if EV is technically positive, +750 or +2200 ML bets are lottery tickets.
+MAX_ML_ODDS = 400   # Won't pick ML underdogs beyond +400
+MIN_ML_ODDS = -400  # Won't pick ML favorites beyond -400 (tiny payout, huge risk)
+
 # Unit sizing based on Edge (model prob - fair implied prob).
 # Edge is more honest than EV — it measures how "wrong" the line is
 # without the payout multiplier inflating underdog bets.
@@ -785,9 +791,13 @@ def generate_picks(games, league_avg_rpg=None):
         # --- Moneyline Pick ---
         if home_ml is not None and away_ml is not None:
             ml = edges["ml"]
-            if ml["ev"] is not None and ml["ev"] >= MIN_EV_THRESHOLD:
+            pick_ml_odds = home_ml if ml.get("side") == "home" else away_ml
+            # Skip extreme odds — +400 longshots are lottery tickets, -400 favorites are tiny payouts
+            if (ml["ev"] is not None and ml["ev"] >= MIN_EV_THRESHOLD
+                    and pick_ml_odds is not None
+                    and pick_ml_odds <= MAX_ML_ODDS
+                    and (pick_ml_odds >= 0 or pick_ml_odds >= MIN_ML_ODDS)):
                 pick_team = home if ml["side"] == "home" else away
-                pick_ml_odds = home_ml if ml["side"] == "home" else away_ml
                 all_picks.append(_make_pick(
                     game_label, "Moneyline", f"{pick_team} ML",
                     ml, sportsbook, edges, proj_spread, proj_total,
