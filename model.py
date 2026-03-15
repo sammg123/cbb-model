@@ -515,36 +515,60 @@ def _model_confidence_for_odds(american_odds):
 
 
 def _min_edge_for_odds(american_odds):
-    """Minimum edge required to pick a bet, scaled by odds extremity.
+    """Minimum edge required to pick a ML bet, scaled by odds extremity.
 
-    Close lines (-110 to +150): 3% edge (normal threshold)
-    Moderate dogs (+200 to +300): 8% edge
-    Big dogs (+300 to +500): 12% edge
-    Extreme dogs (+500+): 18% edge — model must genuinely see an upset
+    Close lines (-110 to +150): 5% edge
+    Moderate dogs (+200 to +300): 10% edge
+    Big dogs (+300 to +500): 15% edge
+    Extreme dogs (+500+): 20% edge — model must genuinely see an upset
 
-    This filters noise-driven longshot EV while letting real upsets through.
-    No hard caps — a +750 pick CAN happen if the model sees 18%+ edge.
+    No hard caps — a +750 pick CAN happen if the model sees 20%+ edge.
     """
     if american_odds is None:
-        return 0.03
+        return 0.05
 
     if american_odds > 0:
         if american_odds >= 500:
-            return 0.18
+            return 0.20
         elif american_odds >= 300:
-            return 0.12
+            return 0.15
         elif american_odds >= 200:
+            return 0.10
+        else:
+            return 0.05
+    else:
+        if american_odds <= -400:
+            return 0.12
+        elif american_odds <= -250:
             return 0.08
         else:
-            return 0.03
+            return 0.05
+
+
+def _schedule_quality_penalty(home_sos, away_sos, league_avg_sos):
+    """Require bigger edges when one team has a weak/uncertain schedule.
+
+    The Miami Ohio problem: a team can be 35-0 against garbage and look elite.
+    When a weak-schedule team is involved, the model's projection is UNCERTAIN.
+    We need a bigger edge to bet on or against them.
+
+    Returns a multiplier on the min edge threshold (1.0 = no penalty, 2.0 = double).
+    """
+    if home_sos is None or away_sos is None or league_avg_sos is None:
+        return 1.0
+
+    # How weak is the weakest team's schedule?
+    min_sos = min(home_sos, away_sos)
+    sos_deficit = league_avg_sos - min_sos  # positive = below average
+
+    if sos_deficit <= 0.03:
+        return 1.0   # Both teams have decent schedules — no penalty
+    elif sos_deficit <= 0.08:
+        return 1.3   # One team somewhat weak — 30% higher edge needed
+    elif sos_deficit <= 0.15:
+        return 1.6   # One team clearly weak — 60% higher edge needed
     else:
-        # Favorites: -400 or worse need higher edge too (vig eats profit)
-        if american_odds <= -400:
-            return 0.10
-        elif american_odds <= -250:
-            return 0.06
-        else:
-            return 0.03
+        return 2.0   # Extreme weak schedule (VMI territory) — double the edge needed
 
 
 def calculate_ev(true_prob, american_odds):
@@ -869,8 +893,13 @@ def generate_picks(games, league_avg_rpg=None):
         if home_ml is not None and away_ml is not None:
             ml = edges["ml"]
             pick_ml_odds = home_ml if ml.get("side") == "home" else away_ml
-            # Require higher edge for extreme odds — longshots need real conviction
+            # Require higher edge for extreme odds + weak schedules
             min_edge = _min_edge_for_odds(pick_ml_odds)
+            # Schedule quality penalty: weak-SOS teams = uncertain projections = need bigger edge
+            home_sos = home_stats.get("sos") if home_stats else None
+            away_sos = away_stats.get("sos") if away_stats else None
+            sos_penalty = _schedule_quality_penalty(home_sos, away_sos, game.get("league_avg_sos") or 0.497)
+            min_edge *= sos_penalty
             ml_edge = (ml.get("sim_pct", 0) / 100.0) - (ml_to_implied_prob(pick_ml_odds) or 0.5)
             if (ml["ev"] is not None and ml["ev"] >= MIN_EV_THRESHOLD
                     and ml_edge >= min_edge):
