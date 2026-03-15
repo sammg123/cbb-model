@@ -80,8 +80,11 @@ MIN_EV_THRESHOLD = 0.03  # 3% EV minimum to show
 # Maximum ML odds — don't pick extreme longshots. +400 means 4-to-1 underdog.
 # Beyond this, the model's edge is almost certainly noise, not real value.
 # Even if EV is technically positive, +750 or +2200 ML bets are lottery tickets.
-MAX_ML_ODDS = 400   # Won't pick ML underdogs beyond +400
-MIN_ML_ODDS = -400  # Won't pick ML favorites beyond -400 (tiny payout, huge risk)
+# Minimum EDGE required scales with odds extremity.
+# Close lines (+100 to +200): normal 3% edge threshold is fine.
+# Bigger dogs (+300 to +500): need 10%+ edge — model must REALLY disagree with market.
+# Extreme dogs (+500+): need 15%+ edge — almost never passes, but doesn't hard-cap.
+# This lets genuine upsets through while filtering noise-driven longshot EV.
 
 # Unit sizing based on Edge (model prob - fair implied prob).
 # Edge is more honest than EV — it measures how "wrong" the line is
@@ -481,6 +484,39 @@ def _model_confidence_for_odds(american_odds):
     return MODEL_CONFIDENCE_BASE - t * (MODEL_CONFIDENCE_BASE - MODEL_CONFIDENCE_MIN)
 
 
+def _min_edge_for_odds(american_odds):
+    """Minimum edge required to pick a bet, scaled by odds extremity.
+
+    Close lines (-110 to +150): 3% edge (normal threshold)
+    Moderate dogs (+200 to +300): 8% edge
+    Big dogs (+300 to +500): 12% edge
+    Extreme dogs (+500+): 18% edge — model must genuinely see an upset
+
+    This filters noise-driven longshot EV while letting real upsets through.
+    No hard caps — a +750 pick CAN happen if the model sees 18%+ edge.
+    """
+    if american_odds is None:
+        return 0.03
+
+    if american_odds > 0:
+        if american_odds >= 500:
+            return 0.18
+        elif american_odds >= 300:
+            return 0.12
+        elif american_odds >= 200:
+            return 0.08
+        else:
+            return 0.03
+    else:
+        # Favorites: -400 or worse need higher edge too (vig eats profit)
+        if american_odds <= -400:
+            return 0.10
+        elif american_odds <= -250:
+            return 0.06
+        else:
+            return 0.03
+
+
 def calculate_ev(true_prob, american_odds):
     """Calculate Expected Value per $1 wagered.
 
@@ -792,11 +828,11 @@ def generate_picks(games, league_avg_rpg=None):
         if home_ml is not None and away_ml is not None:
             ml = edges["ml"]
             pick_ml_odds = home_ml if ml.get("side") == "home" else away_ml
-            # Skip extreme odds — +400 longshots are lottery tickets, -400 favorites are tiny payouts
+            # Require higher edge for extreme odds — longshots need real conviction
+            min_edge = _min_edge_for_odds(pick_ml_odds)
+            ml_edge = (ml.get("sim_pct", 0) / 100.0) - (ml_to_implied_prob(pick_ml_odds) or 0.5)
             if (ml["ev"] is not None and ml["ev"] >= MIN_EV_THRESHOLD
-                    and pick_ml_odds is not None
-                    and pick_ml_odds <= MAX_ML_ODDS
-                    and (pick_ml_odds >= 0 or pick_ml_odds >= MIN_ML_ODDS)):
+                    and ml_edge >= min_edge):
                 pick_team = home if ml["side"] == "home" else away
                 all_picks.append(_make_pick(
                     game_label, "Moneyline", f"{pick_team} ML",
