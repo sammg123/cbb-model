@@ -624,7 +624,7 @@ def generate_picks(games, league_avg_rpg=None):
                 all_picks.append(_make_pick(
                     game_label, "Run Line", f"{pick_team} {pick_line:+.1f}",
                     rl, sportsbook, edges, proj_spread, proj_total,
-                    game_time=game_time_str,
+                    game_time=game_time_str, pick_team=pick_team,
                 ))
 
         # --- Over/Under Pick ---
@@ -647,7 +647,12 @@ def generate_picks(games, league_avg_rpg=None):
                     game_label, "Moneyline", f"{pick_team} ML",
                     ml, sportsbook, edges, proj_spread, proj_total,
                     odds_override=f"{pick_ml_odds:+d}", game_time=game_time_str,
+                    pick_team=pick_team,
                 ))
+
+    # --- Deduplicate correlated picks ---
+    # Remove same-side ML + RL combos (keep higher EV), enforce max 2 per game
+    all_picks = _deduplicate_correlated_picks(all_picks)
 
     # --- Dynamic daily threshold ---
     all_picks = _apply_daily_threshold(all_picks)
@@ -659,7 +664,8 @@ def generate_picks(games, league_avg_rpg=None):
 
 
 def _make_pick(game_label, bet_type, pick_str, edge_data, sportsbook,
-               edges, proj_spread, proj_total, odds_override=None, game_time=""):
+               edges, proj_spread, proj_total, odds_override=None,
+               game_time="", pick_team=None):
     """Build a pick dict with EV score and continuous unit sizing."""
     ev = edge_data["ev"]
     odds_display = odds_override or str(edge_data.get("odds", "-110"))
@@ -686,7 +692,61 @@ def _make_pick(game_label, bet_type, pick_str, edge_data, sportsbook,
         "Proj Total": f"{proj_total:.1f}",
         "Result": "Pending",
         "_ev": ev,
+        "_pick_team": pick_team,  # team name for ML/RL, None for O/U
     }
+
+
+def _deduplicate_correlated_picks(picks):
+    """Remove correlated same-side bets within a game.
+
+    Rules:
+    1. ML and Run Line on the SAME SIDE (same team) are correlated —
+       if the team wins, both hit; if they lose, both miss. This doubles
+       exposure without diversification. Keep only the higher EV one.
+    2. Over/Under is INDEPENDENT from ML/RL — it's fine to have
+       Under + Team ML in the same game.
+    3. Max 2 picks per game (one side bet + one total bet).
+    """
+    from collections import defaultdict
+
+    # Group picks by game
+    by_game = defaultdict(list)
+    for pick in picks:
+        by_game[pick["Game"]].append(pick)
+
+    deduped = []
+    for game, game_picks in by_game.items():
+        # Separate into side bets (ML, RL) and total bets (O/U)
+        side_bets = [p for p in game_picks if p["Bet Type"] in ("Moneyline", "Run Line")]
+        total_bets = [p for p in game_picks if p["Bet Type"] == "Over/Under"]
+
+        # Deduplicate correlated side bets:
+        # If ML and RL are on the SAME team, keep only the higher EV one.
+        # If they're on different teams (rare but possible), both are fine.
+        if len(side_bets) == 2:
+            ml_pick = next((p for p in side_bets if p["Bet Type"] == "Moneyline"), None)
+            rl_pick = next((p for p in side_bets if p["Bet Type"] == "Run Line"), None)
+            if ml_pick and rl_pick and ml_pick["_pick_team"] == rl_pick["_pick_team"]:
+                # Same team on both — correlated. Keep higher EV.
+                if ml_pick.get("_ev", 0) >= rl_pick.get("_ev", 0):
+                    side_bets = [ml_pick]
+                else:
+                    side_bets = [rl_pick]
+
+        # Enforce max 2 picks per game (best side bet + best total bet)
+        # Sort each group by EV descending and take the best
+        side_bets.sort(key=lambda p: p.get("_ev", 0), reverse=True)
+        total_bets.sort(key=lambda p: p.get("_ev", 0), reverse=True)
+
+        kept = []
+        if side_bets:
+            kept.append(side_bets[0])
+        if total_bets:
+            kept.append(total_bets[0])
+
+        deduped.extend(kept)
+
+    return deduped
 
 
 def _apply_daily_threshold(picks):
