@@ -742,7 +742,14 @@ def _deduplicate_correlated_picks(picks):
         if side_bets:
             kept.append(side_bets[0])
         if total_bets:
-            kept.append(total_bets[0])
+            tb = total_bets[0]
+            # If there's already a side bet in this game, reduce the O/U units
+            # by 30% to cap total game exposure (research-backed)
+            if side_bets:
+                current_units = float(tb["Unit Size"].replace("u", ""))
+                reduced = max(0.5, round(current_units * 0.7, 1))
+                tb["Unit Size"] = f"{reduced}u"
+            kept.append(tb)
 
         deduped.extend(kept)
 
