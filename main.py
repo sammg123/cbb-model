@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from scraper import get_schedule, get_team_stats, get_odds, get_game_results, match_team, normalize_name, get_season_results, common_opponent_edge, get_pitcher_stats, get_starters_from_espn, get_team_eras, load_prior_year_stats, save_season_stats
+from scraper import get_schedule, get_team_stats, get_odds, get_game_results, match_team, normalize_name, get_season_results, common_opponent_edge, get_pitcher_stats, get_starters_from_espn, get_team_eras, load_prior_year_stats, save_season_stats, infer_probable_starters, get_team_latitude
 from model import generate_picks, picks_to_dataframe
 from sheets import write_picks, update_results_in_all_picks, COLUMNS
 
@@ -32,7 +32,8 @@ def _match_starter(starter_name, team_name, pitcher_db):
 
 def merge_game_data(games, team_stats, odds, season_results=None, quality_records=None,
                     recency_stats=None, starters=None, pitcher_db=None,
-                    team_eras_db=None, prior_stats=None, park_factors=None):
+                    team_eras_db=None, prior_stats=None, park_factors=None,
+                    inferred_starters=None):
     """Combine schedule, team stats, odds, common opponent, recency, and quality records into model-ready game dicts."""
     merged = []
     matched_count = 0
@@ -183,8 +184,13 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
         away_starter_ip = None
         home_team_era = None
         away_team_era = None
+        home_starter_confidence = 1.0
+        away_starter_confidence = 1.0
 
         espn_id = game.get("espn_id", "")
+        game_key = espn_id or f"{away}_vs_{home}"
+
+        # Try ESPN-confirmed starters first (confidence=1.0)
         if starters and pitcher_db and espn_id in starters:
             starter_info = starters[espn_id]
             hs = _match_starter(starter_info.get("home_starter"), home, pitcher_db)
@@ -192,12 +198,34 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
                 home_starter_era = hs.get("era")
                 home_starter_ip = hs.get("ip")
                 home_team_era = team_eras_db.get(normalize_name(home)) if team_eras_db else None
+                home_starter_confidence = 1.0
 
             aws = _match_starter(starter_info.get("away_starter"), away, pitcher_db)
             if aws:
                 away_starter_era = aws.get("era")
                 away_starter_ip = aws.get("ip")
                 away_team_era = team_eras_db.get(normalize_name(away)) if team_eras_db else None
+                away_starter_confidence = 1.0
+
+        # Fall back to inferred starters for missing data (confidence=0.5)
+        if inferred_starters:
+            if home_starter_era is None:
+                inf_key = (normalize_name(home), game_key, "home")
+                inf = inferred_starters.get(inf_key)
+                if inf:
+                    home_starter_era = inf["starter_era"]
+                    home_starter_ip = inf["starter_ip"]
+                    home_team_era = team_eras_db.get(normalize_name(home)) if team_eras_db else None
+                    home_starter_confidence = inf["confidence"]
+
+            if away_starter_era is None:
+                inf_key = (normalize_name(away), game_key, "away")
+                inf = inferred_starters.get(inf_key)
+                if inf:
+                    away_starter_era = inf["starter_era"]
+                    away_starter_ip = inf["starter_ip"]
+                    away_team_era = team_eras_db.get(normalize_name(away)) if team_eras_db else None
+                    away_starter_confidence = inf["confidence"]
 
         # Prior year Bayesian priors
         home_prior = prior_stats.get(home_norm, {}) if prior_stats else {}
@@ -205,6 +233,9 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
 
         # Park factor for home team
         home_pf = park_factors.get(home_norm, 1.0) if park_factors else 1.0
+
+        # Latitude for weather adjustment
+        home_lat = get_team_latitude(home)
 
         merged.append({
             "home": home,
@@ -245,6 +276,9 @@ def merge_game_data(games, team_stats, odds, season_results=None, quality_record
             "away_prior_rpg": away_prior.get("rpg"),
             "away_prior_rapg": away_prior.get("ra_pg"),
             "park_factor": home_pf,
+            "home_lat": home_lat,
+            "home_starter_confidence": home_starter_confidence,
+            "away_starter_confidence": away_starter_confidence,
         })
 
         # One pick per game per bet type — no duplicates across books.
@@ -587,7 +621,8 @@ def run_daily():
     odds, odds_api_raw = get_odds(today)
     games = get_schedule(today, odds_data=odds_api_raw)
     starters = get_starters_from_espn(games)
-    print(f"  Starters: {len(starters)} games, Pitcher DB: {len(pitcher_db)} pitchers")
+    inferred_starters = infer_probable_starters(pitcher_db, games, team_eras_db)
+    print(f"  Starters: {len(starters)} ESPN-confirmed, {len(inferred_starters)} inferred, Pitcher DB: {len(pitcher_db)} pitchers")
     season_results = get_season_results(days_back=25)
 
     # Load prior year stats for Bayesian priors
@@ -612,7 +647,8 @@ def run_daily():
     merged = merge_game_data(games, team_stats, odds, season_results, quality_records,
                              recency_stats, starters=starters, pitcher_db=pitcher_db,
                              team_eras_db=team_eras_db, prior_stats=prior_stats,
-                             park_factors=park_factors)
+                             park_factors=park_factors,
+                             inferred_starters=inferred_starters)
     print(f"  Total game entries: {len(merged)}")
 
     # Step 4: Run model

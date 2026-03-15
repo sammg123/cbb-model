@@ -42,11 +42,41 @@ COLD_REGION_KEYWORDS = {
 }
 
 
-def _weather_total_adjustment(home_team_name, game_month):
-    """Regional temperature proxy -- cold-weather parks depress scoring in early season."""
+def _weather_total_adjustment(home_team_name, game_month, home_lat=None):
+    """Temperature adjustment based on venue latitude and month.
+
+    Latitude-based is more accurate than keyword matching:
+    - lat >= 42: cold in March/April (Michigan, Minnesota, Wisconsin, etc.)
+    - lat 40-42: cool in March (Big Ten, Northeast)
+    - lat 37-40: mild
+    - lat < 37: warm year-round (SEC South, Big 12 South, Sun Belt)
+
+    Falls back to keyword matching if no latitude available.
+    """
     if game_month is None or game_month >= 5:  # May+ = warm everywhere
         return 0.0
 
+    # Latitude-based approach (preferred)
+    if home_lat is not None:
+        if game_month <= 3:  # March
+            if home_lat >= 42:
+                return -0.50  # Very cold (northern Big Ten, Ivy League)
+            elif home_lat >= 40:
+                return -0.35  # Cold (Penn State, Ohio State, Rutgers)
+            elif home_lat >= 37:
+                return -0.15  # Cool (Virginia, Wake Forest)
+            else:
+                return 0.0    # Warm (SEC South, Big 12 South)
+        elif game_month == 4:  # April
+            if home_lat >= 42:
+                return -0.25  # Still cold up north
+            elif home_lat >= 40:
+                return -0.10  # Cooling off
+            else:
+                return 0.0
+        return 0.0
+
+    # Fallback: keyword matching if no latitude available
     home_lower = home_team_name.lower() if home_team_name else ""
     is_cold = any(kw in home_lower for kw in COLD_REGION_KEYWORDS)
 
@@ -739,19 +769,29 @@ def generate_picks(games, league_avg_rpg=None):
             away_stats_ext["_prior_rapg"] = game.get("away_prior_rapg")
 
             # Starting pitcher: adjust RA/G before projection
+            # Confidence multiplier: ESPN-confirmed starters get full weight (1.0),
+            # inferred starters get half weight (0.5) — blend adjusted RA/G with raw RA/G
             if game.get("home_starter_era") is not None and game.get("home_team_era"):
                 adjusted_rapg = adjust_for_starter(
                     home_stats_ext["ra_pg"], game["home_starter_era"], game["home_team_era"],
                     starter_ip=game.get("home_starter_ip"), is_weekend=not is_midweek
                 )
-                home_stats_ext["ra_pg"] = adjusted_rapg
+                starter_conf = game.get("home_starter_confidence", 1.0)
+                home_stats_ext["ra_pg"] = (
+                    starter_conf * adjusted_rapg +
+                    (1 - starter_conf) * home_stats_ext["ra_pg"]
+                )
 
             if game.get("away_starter_era") is not None and game.get("away_team_era"):
                 adjusted_rapg = adjust_for_starter(
                     away_stats_ext["ra_pg"], game["away_starter_era"], game["away_team_era"],
                     starter_ip=game.get("away_starter_ip"), is_weekend=not is_midweek
                 )
-                away_stats_ext["ra_pg"] = adjusted_rapg
+                starter_conf = game.get("away_starter_confidence", 1.0)
+                away_stats_ext["ra_pg"] = (
+                    starter_conf * adjusted_rapg +
+                    (1 - starter_conf) * away_stats_ext["ra_pg"]
+                )
 
             proj_home, proj_away = project_runs(
                 home_stats_ext, away_stats_ext, league_avg_rpg, league_avg_sos, neutral
@@ -772,7 +812,8 @@ def generate_picks(games, league_avg_rpg=None):
         except Exception:
             game_month = datetime.now().month
 
-        weather_adj = _weather_total_adjustment(home, game_month)
+        home_lat = game.get("home_lat")
+        weather_adj = _weather_total_adjustment(home, game_month, home_lat=home_lat)
         if weather_adj != 0 and (proj_home + proj_away) > 0:
             ratio = (proj_home + proj_away + weather_adj) / (proj_home + proj_away)
             proj_home *= max(0.5, ratio)

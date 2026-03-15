@@ -1463,6 +1463,197 @@ def _scrape_espn_odds(date_str=None):
     return odds
 
 
+# --- Approximate coordinates for common college baseball venues ---
+# Used for latitude-based weather adjustments (more accurate than keyword matching)
+
+TEAM_COORDINATES = {
+    "Alabama": (33.21, -87.54),
+    "Arizona": (32.23, -110.95),
+    "Arizona State": (33.42, -111.93),
+    "Arkansas": (36.07, -94.18),
+    "Auburn": (32.60, -85.49),
+    "Baylor": (31.55, -97.12),
+    "Brigham Young": (40.25, -111.65),
+    "Cal State Fullerton": (33.88, -117.89),
+    "Clemson": (34.68, -82.84),
+    "Connecticut": (41.81, -72.25),
+    "Duke": (36.00, -78.94),
+    "Florida": (29.65, -82.35),
+    "Florida State": (30.44, -84.30),
+    "Georgia": (33.95, -83.37),
+    "Georgia Tech": (33.77, -84.39),
+    "Houston": (29.72, -95.34),
+    "Illinois": (40.10, -88.23),
+    "Indiana": (39.17, -86.52),
+    "Iowa": (41.66, -91.55),
+    "Kansas": (38.95, -95.25),
+    "Kansas State": (39.20, -96.58),
+    "Kentucky": (38.03, -84.50),
+    "Louisiana State": (30.41, -91.18),
+    "Louisville": (38.22, -85.76),
+    "Maryland": (38.99, -76.94),
+    "Michigan": (42.27, -83.74),
+    "Minnesota": (44.97, -93.23),
+    "Mississippi": (34.37, -89.54),
+    "Mississippi State": (33.45, -88.79),
+    "Missouri": (38.95, -92.33),
+    "NC State": (35.78, -78.68),
+    "Nebraska": (40.82, -96.70),
+    "North Carolina": (35.91, -79.05),
+    "Notre Dame": (41.70, -86.24),
+    "Ohio State": (40.01, -83.03),
+    "Oklahoma": (35.21, -97.44),
+    "Oklahoma State": (36.13, -97.07),
+    "Oregon": (44.06, -123.07),
+    "Oregon State": (44.56, -123.28),
+    "Penn State": (40.80, -77.86),
+    "Pittsburgh": (40.44, -79.96),
+    "Purdue": (40.42, -86.93),
+    "South Carolina": (34.00, -81.03),
+    "Stanford": (37.43, -122.16),
+    "TCU": (32.71, -97.37),
+    "Tennessee": (35.95, -83.93),
+    "Texas": (30.28, -97.73),
+    "Texas A&M": (30.60, -96.34),
+    "Texas Tech": (33.58, -101.85),
+    "UCLA": (34.07, -118.45),
+    "Vanderbilt": (36.14, -86.80),
+    "Virginia": (38.03, -78.51),
+    "Virginia Tech": (37.23, -80.43),
+    "Wake Forest": (36.13, -80.28),
+    "Washington": (47.65, -122.30),
+    "West Virginia": (39.63, -79.96),
+    "Wisconsin": (43.07, -89.41),
+    "Rutgers": (40.50, -74.45),
+    "Northwestern": (42.06, -87.68),
+    "Boston College": (42.34, -71.17),
+    "Cornell": (42.45, -76.47),
+    "Columbia": (40.81, -73.96),
+    "Princeton": (40.35, -74.66),
+    "Yale": (41.31, -72.92),
+    "Harvard": (42.37, -71.12),
+    "Dartmouth": (43.70, -72.29),
+    "Brown": (41.83, -71.40),
+    "Cincinnati": (39.13, -84.52),
+    "Central Florida": (28.60, -81.20),
+    "Southern California": (34.02, -118.29),
+    "Colorado": (40.01, -105.27),
+}
+
+
+def get_team_latitude(team_name):
+    """Look up approximate latitude for a team's venue.
+
+    Returns latitude (float) or None if team not in lookup.
+    Used for latitude-based weather adjustments.
+    """
+    norm = normalize_name(team_name)
+
+    # Direct match
+    for team_key, (lat, lon) in TEAM_COORDINATES.items():
+        if team_key.lower() == norm.lower():
+            return lat
+
+    # Substring match
+    for team_key, (lat, lon) in TEAM_COORDINATES.items():
+        if team_key.lower() in norm.lower() or norm.lower() in team_key.lower():
+            return lat
+
+    return None
+
+
+def infer_probable_starters(pitcher_db, games, team_eras_db):
+    """Infer probable starting pitchers from rotation patterns.
+
+    Heuristic: Sort each team's pitchers by IP (most innings = most starts).
+    - Friday (day 4) / Saturday (day 5): top 1-2 pitchers by IP
+    - Sunday (day 6): #3 pitcher by IP
+    - Midweek (Mon-Thu): lower IP pitchers
+
+    Returns dict: {(team_norm, espn_id_or_game_key): {
+        "starter_era": float, "starter_ip": float, "confidence": float
+    }}
+
+    Confidence is LOW (0.5) because this is pattern-based, not confirmed.
+    """
+    # Step 1: Group pitchers by team, sort by IP descending
+    team_pitchers = {}
+    for (team, name), stats in pitcher_db.items():
+        if stats.get("ip") and stats["ip"] >= 15:
+            team_pitchers.setdefault(team, []).append({
+                "name": name,
+                "era": stats.get("era"),
+                "ip": stats.get("ip"),
+                "whip": stats.get("whip"),
+            })
+
+    # Sort each team by IP descending (most IP = highest rotation slot)
+    for team in team_pitchers:
+        team_pitchers[team].sort(key=lambda p: p["ip"], reverse=True)
+
+    # Step 2: Determine day of week for today's games
+    inferred = {}
+    for game in games:
+        if game.get("status") == "STATUS_FINAL":
+            continue
+
+        raw_time = game.get("game_time", "")
+        try:
+            if raw_time:
+                game_date = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            else:
+                game_date = datetime.now()
+            day_of_week = game_date.weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+        except Exception:
+            day_of_week = datetime.now().weekday()
+
+        # Step 3: For each team (home + away), pick the rotation slot
+        # Friday=ace (#1), Saturday=#2, Sunday=#3, Midweek=#4+
+        if day_of_week == 4:      # Friday
+            slot = 0
+        elif day_of_week == 5:    # Saturday
+            slot = 1
+        elif day_of_week == 6:    # Sunday
+            slot = 2
+        else:                     # Mon-Thu (midweek)
+            slot = 3
+
+        espn_id = game.get("espn_id", "")
+        game_key = espn_id or f"{game['away']}_vs_{game['home']}"
+
+        for team_field in ["home", "away"]:
+            team_name = game.get(team_field, "")
+            team_norm = normalize_name(team_name)
+            pitchers = team_pitchers.get(team_norm, [])
+
+            if not pitchers:
+                # Try fuzzy match
+                for t_key, t_pitchers in team_pitchers.items():
+                    if _fuzzy_match(team_norm, t_key):
+                        pitchers = t_pitchers
+                        break
+
+            if not pitchers:
+                continue
+
+            # Pick the rotation slot (clamp to available pitchers)
+            idx = min(slot, len(pitchers) - 1)
+            starter = pitchers[idx]
+
+            inferred_key = (team_norm, game_key, team_field)
+            inferred[inferred_key] = {
+                "starter_era": starter["era"],
+                "starter_ip": starter["ip"],
+                "starter_name": starter["name"],
+                "confidence": 0.5,
+            }
+
+    if inferred:
+        print(f"  Inferred probable starters for {len(inferred)} team-games (confidence=0.5)")
+
+    return inferred
+
+
 def save_season_stats(team_stats, filename="prior_year_stats.json"):
     """Archive current season's team stats for next year's Bayesian priors."""
     path = os.path.join(os.path.dirname(__file__), filename)
