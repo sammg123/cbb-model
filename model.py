@@ -900,7 +900,7 @@ def generate_picks(games, league_avg_rpg=None):
             away_sos = away_stats.get("sos") if away_stats else None
             sos_penalty = _schedule_quality_penalty(home_sos, away_sos, game.get("league_avg_sos") or 0.497)
             min_edge *= sos_penalty
-            ml_edge = (ml.get("sim_pct", 0) / 100.0) - (ml_to_implied_prob(pick_ml_odds) or 0.5)
+            ml_edge = ((ml.get("sim_pct") or 0) / 100.0) - (ml_to_implied_prob(pick_ml_odds) or 0.5)
             if (ml["ev"] is not None and ml["ev"] >= MIN_EV_THRESHOLD
                     and ml_edge >= min_edge):
                 pick_team = home if ml["side"] == "home" else away
