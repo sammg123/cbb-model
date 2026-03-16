@@ -606,6 +606,20 @@ def settle_yesterdays_bets():
 def run_daily():
     """Full daily pipeline: settle yesterday + generate today's picks."""
 
+    # Step 0: Check if we already ran today (backup cron safety)
+    from sheets import get_client, get_or_create_spreadsheet, TAB_TODAY
+    try:
+        client = get_client()
+        sheet = get_or_create_spreadsheet(client)
+        today_ws = sheet.worksheet(TAB_TODAY)
+        today_data = today_ws.get_all_values()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if len(today_data) > 1 and today_data[1][0] == today_str:
+            print(f"Already ran today ({today_str}) — {len(today_data)-1} picks exist. Skipping.")
+            return
+    except Exception:
+        pass  # If check fails, proceed normally
+
     # Step 1: Settle yesterday's bets
     settle_yesterdays_bets()
 
