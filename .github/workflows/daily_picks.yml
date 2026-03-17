@@ -3,10 +3,14 @@ name: Daily Baseball Picks
 on:
   schedule:
     # Primary: 9:45 AM CDT = 14:45 UTC
-    # Backup: 10:05 AM CDT = 15:05 UTC (in case GitHub skips the first)
+    # Backup: 10:05 AM CDT = 15:05 UTC
+    # Second backup: 10:25 AM CDT = 15:25 UTC
     - cron: "45 14 * * *"
     - cron: "5 15 * * *"
+    - cron: "25 15 * * *"
   workflow_dispatch: # Allow manual trigger from GitHub UI
+  repository_dispatch:
+    types: [daily-picks] # External webhook trigger
 
 jobs:
   daily-picks:
