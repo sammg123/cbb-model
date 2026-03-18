@@ -229,7 +229,7 @@ def _build_dashboard(sheet):
         ["", "Hits",
          "=COUNTIF('All Picks'!P2:P,\"Hit\")", "",
          "Units Won",
-         "=SUMPRODUCT(('All Picks'!P2:P=\"Hit\")*VALUE(SUBSTITUTE('All Picks'!H2:H,\"u\",\"\")))",
+         "=SUMPRODUCT(('All Picks'!P2:P=\"Hit\")*VALUE(SUBSTITUTE('All Picks'!H2:H,\"u\",\"\"))*IF(LEFT('All Picks'!F2:F,1)=\"+\",VALUE('All Picks'!F2:F)/100,IF(VALUE('All Picks'!F2:F)<0,100/ABS(VALUE('All Picks'!F2:F)),1)))",
          "", ""],
         ["", "Misses",
          "=COUNTIF('All Picks'!P2:P,\"Miss\")", "",
