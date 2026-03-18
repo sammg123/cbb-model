@@ -189,22 +189,39 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     away_rpg = _regress_to_mean(away_stats["rpg"], league_avg_rpg, prior=away_stats.get("_prior_rpg"))
     away_rapg = _regress_to_mean(away_stats["ra_pg"], league_avg_rapg, prior=away_stats.get("_prior_rapg"))
 
-    # Step 2: SOS adjustment (65% weight)
-    # SOS is critical — a team with 10 RPG against a .28 SOS (weak schedule)
-    # is NOT the same as 10 RPG against a .55 SOS (SEC schedule).
-    # 65% weight is aggressive but necessary — without strong SOS correction,
-    # weak-conference pretenders with inflated stats pollute the picks.
-    # The quality opponent adjustment in Step 5 further reinforces this.
+    # Step 2: Relative SOS adjustment
+    # KEY INSIGHT: SOS should be RELATIVE to the matchup, not absolute.
+    #
+    # Two .35 SOS teams playing each other → no adjustment needed.
+    # Their stats are inflated against the league, but they're playing
+    # each other, so the inflation cancels out. Both defenses are bad,
+    # both offenses feasted on bad teams — the game will be high-scoring.
+    #
+    # A .35 SOS team playing a .55 SOS team → big adjustment.
+    # The weak team's stats are inflated, the strong team's are earned.
+    #
+    # Method: adjust based on SOS GAP between the two teams.
+    # If both teams have similar SOS → small/no adjustment.
+    # If big gap → the weaker-SOS team gets deflated, stronger gets boosted.
     SOS_WEIGHT = 0.65
     if league_avg_sos and league_avg_sos > 0:
         home_sos = home_stats.get("sos") or league_avg_sos
         away_sos = away_stats.get("sos") or league_avg_sos
 
-        home_sos_raw = home_sos / league_avg_sos
-        away_sos_raw = away_sos / league_avg_sos
+        # The SOS gap determines how much to adjust
+        # If both teams are .35, gap = 0 → no adjustment
+        # If one is .35 and other is .55, gap = .20 → big adjustment
+        sos_gap = home_sos - away_sos  # positive = home had tougher schedule
 
-        home_sos_factor = 1.0 + SOS_WEIGHT * (home_sos_raw - 1.0)
-        away_sos_factor = 1.0 + SOS_WEIGHT * (away_sos_raw - 1.0)
+        # Each team's adjustment is relative to their OPPONENT's schedule, not league avg
+        # Home team played tough schedule (.55) vs away's weak schedule (.35):
+        #   → Home's offense is more impressive (boost RPG)
+        #   → Home's defense faced better hitters (deflate RA/G = defense is better)
+        # But scale by the GAP, not absolute position
+        gap_factor = sos_gap / league_avg_sos  # normalize by league avg
+
+        home_sos_factor = 1.0 + SOS_WEIGHT * gap_factor * 0.5
+        away_sos_factor = 1.0 - SOS_WEIGHT * gap_factor * 0.5
 
         home_rpg *= home_sos_factor
         away_rpg *= away_sos_factor
