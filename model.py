@@ -598,21 +598,17 @@ def calculate_ev(true_prob, american_odds):
 def sim_pct_to_units(sim_pct):
     """Convert Sim% (model's probability the pick hits) to unit size.
 
-    Higher probability = more units. We bet bigger on picks we're
-    more confident will hit, regardless of payout.
-
-    A 50% pick at +380 has great EV but it's a coin flip — small bet.
-    An 80% pick at -200 has modest EV but it's likely to hit — bigger bet.
+    Higher probability = more units.
 
     Sim% tiers:
-      80%+  → 3.0u  (very likely to hit)
+      80%+  → 3.0u  (lock)
       70-80 → 2.5u
       65-70 → 2.0u
-      60-65 → 1.5u
-      55-60 → 1.0u
-      50-55 → 0.5u  (coin flip territory — small play)
+      55-65 → 1.5u
+      35-55 → 1.0u  (if the model picked it, the EV is there — worth 1u)
+      <35%  → 0.5u  (longshot with EV — small play)
     """
-    if sim_pct is None or sim_pct <= 50:
+    if sim_pct is None or sim_pct < 35:
         return 0.5
     if sim_pct >= 80:
         return 3.0
@@ -620,12 +616,10 @@ def sim_pct_to_units(sim_pct):
         return 2.5
     elif sim_pct >= 65:
         return 2.0
-    elif sim_pct >= 60:
-        return 1.5
     elif sim_pct >= 55:
-        return 1.0
+        return 1.5
     else:
-        return 0.5
+        return 1.0
 
 
 # --- Edge Calculation ---
