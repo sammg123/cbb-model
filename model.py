@@ -595,19 +595,37 @@ def calculate_ev(true_prob, american_odds):
     return true_prob * profit_if_win - (1 - true_prob)
 
 
-def edge_to_units(edge_pct):
-    """Convert Edge (model prob - fair implied prob) to unit size.
+def sim_pct_to_units(sim_pct):
+    """Convert Sim% (model's probability the pick hits) to unit size.
 
-    Edge is more stable than EV for sizing because it's not inflated
-    by underdog payout multipliers. A 10% edge means the same thing
-    whether it's on a -110 spread or a +300 ML.
+    Higher probability = more units. We bet bigger on picks we're
+    more confident will hit, regardless of payout.
+
+    A 50% pick at +380 has great EV but it's a coin flip — small bet.
+    An 80% pick at -200 has modest EV but it's likely to hit — bigger bet.
+
+    Sim% tiers:
+      80%+  → 3.0u  (very likely to hit)
+      70-80 → 2.5u
+      65-70 → 2.0u
+      60-65 → 1.5u
+      55-60 → 1.0u
+      50-55 → 0.5u  (coin flip territory — small play)
     """
-    if edge_pct is None or edge_pct <= 0:
-        return 0
-    for min_edge, units in UNIT_TIERS_EDGE:
-        if edge_pct >= min_edge:
-            return units
-    return 0
+    if sim_pct is None or sim_pct <= 50:
+        return 0.5
+    if sim_pct >= 80:
+        return 3.0
+    elif sim_pct >= 70:
+        return 2.5
+    elif sim_pct >= 65:
+        return 2.0
+    elif sim_pct >= 60:
+        return 1.5
+    elif sim_pct >= 55:
+        return 1.0
+    else:
+        return 0.5
 
 
 # --- Edge Calculation ---
@@ -933,7 +951,7 @@ def _make_pick(game_label, bet_type, pick_str, edge_data, sportsbook,
     implied = ml_to_implied_prob(edge_data.get("odds", -110)) or 0.524
     model_prob = (edge_data["sim_pct"] or 0) / 100.0
     edge_pct = model_prob - implied
-    units = edge_to_units(edge_pct)
+    units = sim_pct_to_units(edge_data.get("sim_pct"))
 
     return {
         "Date": datetime.now().strftime("%Y-%m-%d"),
