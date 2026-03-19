@@ -179,15 +179,16 @@ def project_runs(home_stats, away_stats, league_avg_rpg=None,
     if league_avg_rpg is None or league_avg_rpg <= 0:
         league_avg_rpg = D1_AVG_RPG
 
-    # Step 1: Regress stats toward league average (or prior year if available)
-    # Early season (17 games): ~40% weight on raw stats
-    # Late season (50 games): ~67% weight on raw stats
-    # Prior year data provides team-specific anchors instead of league avg
-    league_avg_rapg = league_avg_rpg  # RA/G ≈ RPG league-wide
-    home_rpg = _regress_to_mean(home_stats["rpg"], league_avg_rpg, prior=home_stats.get("_prior_rpg"))
-    home_rapg = _regress_to_mean(home_stats["ra_pg"], league_avg_rapg, prior=home_stats.get("_prior_rapg"))
-    away_rpg = _regress_to_mean(away_stats["rpg"], league_avg_rpg, prior=away_stats.get("_prior_rpg"))
-    away_rapg = _regress_to_mean(away_stats["ra_pg"], league_avg_rapg, prior=away_stats.get("_prior_rapg"))
+    # Step 1: Use raw stats — no regression.
+    # Regression was causing systematic Under bias by compressing all totals
+    # toward league average (~13 total). With 15+ signals per team (SOS, quality
+    # opponent margin, common opponents, JOPS, RA9, K/BB, errors, momentum,
+    # recency, win%), the "is this team legit?" question is answered by those
+    # signals, not by blindly pulling stats toward average.
+    home_rpg = home_stats["rpg"]
+    home_rapg = home_stats["ra_pg"]
+    away_rpg = away_stats["rpg"]
+    away_rapg = away_stats["ra_pg"]
 
     # Step 2: Relative SOS adjustment
     # KEY INSIGHT: SOS should be RELATIVE to the matchup, not absolute.
