@@ -208,8 +208,8 @@ def _style_picks_tab(sheet, ws, num_data_rows):
 
 def _build_dashboard(sheet):
     """Build the summary dashboard with formulas that auto-calculate from All Picks."""
-    ws = _get_or_create_tab(sheet, TAB_DASHBOARD, rows=30, cols=8)
-    ws.clear()
+    ws = _get_or_create_tab(sheet, TAB_DASHBOARD, rows=80, cols=20)
+    # DON'T clear — chart data lives in columns K-Q and would be wiped
 
     # Dashboard layout
     rows = [
