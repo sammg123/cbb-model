@@ -105,7 +105,7 @@ MODEL_CONFIDENCE_MIN = 0.45     # Trust model 45% on extreme lines (+500/-500)
 # Minimum EV% to show a pick — this is the "is it worth gambling on?" threshold.
 # In college baseball (inefficient markets), 3-5% EV is where real value starts.
 # Below that, the edge is likely noise. Above it, you're exploiting a lazy line.
-MIN_EV_THRESHOLD = 0.03  # 3% EV minimum to show
+MIN_EV_THRESHOLD = 0.20  # 20% EV minimum to show
 
 # Maximum ML odds — don't pick extreme longshots. +400 means 4-to-1 underdog.
 # Beyond this, the model's edge is almost certainly noise, not real value.
@@ -945,8 +945,9 @@ def generate_picks(games, league_avg_rpg=None):
     # Remove same-side ML + RL combos (keep higher EV), enforce max 2 per game
     all_picks = _deduplicate_correlated_picks(all_picks)
 
-    # --- Dynamic daily threshold ---
-    all_picks = _apply_daily_threshold(all_picks)
+    # No artificial cap — EV threshold (20%) is the only filter.
+    # The model's upstream signals (SOS, quality margin, fraud penalty,
+    # ML edge scaling) already kill weak picks before they get here.
 
     # Sort by date then time (earliest games first)
     all_picks.sort(key=lambda p: (p.get("Date", ""), p.get("Time", "99:99")))
