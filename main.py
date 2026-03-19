@@ -432,12 +432,36 @@ def _log_picks_for_clv(picks):
 
 
 def _fuzzy(a, b):
-    """Quick fuzzy name match."""
-    a, b = a.lower().strip(), b.lower().strip()
+    """Quick fuzzy name match — strips periods and common punctuation."""
+    a = a.lower().strip().replace(".", "").replace("'", "").replace("-", " ")
+    b = b.lower().strip().replace(".", "").replace("'", "").replace("-", " ")
     if a == b:
         return True
     if a in b or b in a:
         return True
+    # Check common abbreviations
+    _ABBREVS = {
+        "fiu": "florida int",
+        "fau": "florida atlantic",
+        "usc": "southern california",
+        "lsu": "louisiana state",
+        "ole miss": "mississippi",
+        "ucf": "central florida",
+        "unc": "north carolina",
+        "uconn": "connecticut",
+        "umass": "massachusetts",
+        "smu": "southern methodist",
+        "tcu": "texas christian",
+        "byu": "brigham young",
+        "vcu": "virginia commonwealth",
+        "utsa": "ut san antonio",
+        "unlv": "nevada las vegas",
+    }
+    for abbr, full in _ABBREVS.items():
+        if (abbr in a and full in b) or (full in a and abbr in b):
+            return True
+        if (abbr == a and full in b) or (full == a and abbr in b):
+            return True
     return False
 
 
